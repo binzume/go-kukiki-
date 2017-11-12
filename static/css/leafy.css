@@ -1,0 +1,137 @@
+body {
+	padding: 0pt;
+	margin: 0pt;
+}
+
+header {
+	padding: 2pt 10pt 2pt 2pt;
+	color: white;
+	background-color: black;
+	font-weight: bold;
+}
+
+header a{
+	display: inline-block;
+	text-decoration: none;
+	cursor: pointer;
+	color: inherit ;
+	border-radius: 2pt;
+}
+
+header a:hover{
+	background-color: #444444;
+}
+
+header form {
+	display: inline-block;
+}
+
+#side-pane {
+	width: 200pt;
+	float:left;
+	margin-right: 10pt;
+	height: 100%;
+	min-height: calc(100vh - 30pt);
+	border: solid #888888;
+	border-width: 0px 1px 0px 0px;
+}
+
+#content-pane {
+	float:left;
+}
+
+#editor-pane {
+	float: left;
+	width: calc(50% - 24pt);
+	height: 100%;
+	padding: 10pt;
+	border: solid 1pt #888888;
+}
+
+#preview-pane {
+	float: left;
+	width: calc(50% - 24pt);
+	height: 100%;
+	padding: 8pt;
+	border: solid 1pt #888888;
+	overflow-y: auto;
+}
+
+#content {
+	margin: 0pt 6pt;
+}
+
+
+
+.leafy-content {
+	color: #333333;
+    font: 14px/1.4 Verdana, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+}
+.leafy-content h1 {
+	margin: 8pt 0pt 8pt;
+	padding: 0pt;
+	font-size: 20pt;
+	border-bottom: 1px solid #ddd;
+}
+.leafy-content h2 {
+	margin: 8pt 0pt 6pt;
+	padding: 0pt;
+	font-size: 17pt;
+}
+.leafy-content h3 {
+	margin: 8pt 0pt 6pt;
+	padding: 0pt;
+	font-size: 14pt;
+}
+.leafy-content p{
+	margin: 4pt 0pt 10pt;
+	padding: 0pt;
+}
+.leafy-content a{
+	color: #4466ee;
+}
+
+.leafy-content ul,ol {
+	margin: 0pt;
+	padding: 0pt 16pt;
+}
+
+.leafy-content>ul,ol {
+	margin: 0pt 0pt 10pt;
+}
+
+.leafy-content li>p {
+	margin: 0pt 0pt;
+	padding: 0pt 0pt;
+}
+
+.leafy-content table{
+	margin: 10pt 10pt;
+	border-collapse: collapse;
+}
+.leafy-content table tr td{
+	padding: 4pt;
+    border: solid 1pt #cccccc;
+	min-width: 30pt;
+}
+.leafy-content table tr th{
+	padding: 4pt;
+    border: solid 1pt #cccccc;
+    background-color:#ced;
+	min-width: 30pt;
+}
+.leafy-content .keyword {
+	color: red;
+}
+.leafy-content code {
+	color: #660000;
+}
+.leafy-content pre{
+	margin: 0 0 8pt;
+	padding: 6pt;
+	word-break: break-all;
+	word-wrap: break-word;
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3pt;
+}

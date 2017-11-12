@@ -1,0 +1,128 @@
+
+.gomd {
+	color: #222222;
+    font: 14px/1.4 Verdana, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+}
+.gomd h1,.gomd h2,.gomd h3,.gomd h4 {
+	font-weight: bold;
+	padding: 0pt;
+}
+
+.gomd h1:first-child {
+	margin-top: 2pt;
+}
+.gomd h1 {
+	margin: 8pt 0pt 8pt;
+	font-size: 20pt;
+	border-bottom: 1px solid #ddd;
+}
+.gomd h2 {
+	margin: 8pt 0pt 6pt;
+	font-size: 16pt;
+}
+.gomd h3 {
+	margin: 8pt 0pt 6pt;
+	font-size: 12pt;
+}
+.gomd h4 {
+	margin: 6pt 0pt 4pt;
+	font-size: 10pt;
+}
+
+.gomd p{
+	margin: 4pt 0pt 10pt;
+	padding: 0pt;
+}
+.gomd a{
+	color: #4466ee;
+}
+
+.gomd ul,.gomd ol {
+	margin: 0pt;
+	padding: 0pt 16pt;
+}
+
+.gomd>ul,ol {
+	margin: 0pt 0pt 10pt;
+}
+
+.gomd li>p {
+	margin: 0pt 0pt;
+	padding: 0pt 0pt;
+}
+
+.gomd table{
+	margin: 10pt 10pt;
+	border-collapse: collapse;
+}
+.gomd table tr td{
+	padding: 4pt;
+    border: solid 1pt #cccccc;
+	min-width: 30pt;
+}
+.gomd table tr th{
+	padding: 4pt;
+    border: solid 1pt #cccccc;
+    background-color:#ced;
+	min-width: 30pt;
+}
+.gomd img {
+	margin: 0pt;
+	max-width: 100%;
+}
+.gomd .keyword {
+	color: red;
+}
+
+.gomd pre{
+	margin: 0 0 8pt;
+	padding: 6pt;
+	word-break: break-all;
+	word-wrap: break-word;
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3pt;
+	-moz-tab-size: 4;
+	tab-size: 4;
+}
+.gomd blockquote {
+	margin: 0 0 8pt;
+	padding: 6pt;
+	word-break: break-all;
+	word-wrap: break-word;
+	white-space : pre;
+	border: solid #cccccc;
+	border-width: 0px 0px 0px 4pt;
+}
+
+.gomd code {
+	color: #550000;
+    background-color:#f0f0f0;
+}
+
+.gomd pre code {
+    background-color: transparent;
+}
+.gomd pre code[title="console"] {
+    background-color: black;
+	color: #dddddd;
+}
+.gomd code span.code_str{
+	color: #992200;
+}
+
+.gomd code span.code_key{
+	color: #3355cc;
+}
+
+.gomd code span.code_num{
+	color: #aa0000;
+}
+
+.gomd code span.code_ident{
+	color: #000000;
+}
+
+.gomd code span.code_comment{
+	color: #228022;
+}

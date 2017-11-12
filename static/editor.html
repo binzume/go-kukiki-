@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+	<title>Leafy Editor</title>
+	<link rel="shortcut icon" href="./favicon.ico" type="image/x-icon" />
+	<link rel=stylesheet type="text/css" href="css/leafy.css" />
+	<script src="js/leafy-markdown.js"></script>
+	<script src="js/leafy-editor.js"></script>
+</head>
+<body>
+<header>
+  Leafy Editor
+</header>
+
+https://leafy.kstm.org/sample/<input type="text" name="pagepath" value="ページ名" style="width: calc(100% - 200pt)" />
+
+<div id="content" style="height:calc(100vh - 80pt);">
+
+
+<div id="editor-pane">
+<textarea id="editor" style="width:100%;height:100%">
+# Leafy
+
+[Leafy](https://leafy.kstm.org/) は Markdownで書けるドキュメンテーションツールです．
+まだ開発中です．
+
+ほげ．
+
+## 特徴(予定)
+
+- Markdownで編集できる
+- ページ階層を作れる
+- 編集権限管理
+- シンプルなREST API
+- 速い
+
+
+## マークアップ
+
+
+- 強調，取り消し線． あああ **いいい** ~~ううう~~
+- リンク [kstm](http://www.kstm.org/image/kstmlogo.jpg)
+- ![kstm](http://www.kstm.org/image/kstmlogo.jpg)
+- `inline_code("hello")`
+
+# 見出し1
+
+## 見出し2
+
+### 見出し3
+
+
+リスト
+
+- abc
+  - aaa
+  - bbb
+  - ccc
+- いろは
+  - い
+  - ろ
+  - は
+- 1234
+
+番号付きリスト
+
+01. aaaa
+02. bbbb
+03. cccc
+
+チェックボックス
+
+- [ ] hoge
+- [x] fuga
+
+テーブル
+
+
+|    1| b | @kkawahira |
+|  100| b | c |
+| abc | b | [kstm](http://www.kstm.org/image/kstmlogo.jpg) |
+
+
+コードブロック
+
+```
+function hoge() {
+    console.log("Hello, world!");
+}
+
+```
+
+</textarea>
+</div>
+<div id="preview-pane" class="leafy-content">
+</div>
+
+</div>
+
+</body>
+</html>
+
+
