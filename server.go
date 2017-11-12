@@ -1,8 +1,6 @@
 package main
 
 import (
-
-	// "github.com/gin-gonic/contrib/static"
 	"bufio"
 	"flag"
 	"fmt"
@@ -11,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
-	markdown "github.com/binzume/go-markdown"
+	"github.com/binzume/go-calendar"
+	"github.com/binzume/go-markdown"
 	"github.com/gin-gonic/gin"
 )
 
@@ -54,11 +54,30 @@ func markdownRenderer(c *gin.Context) template.HTML {
 	return "" // template.HTML(out.String())
 }
 
+func printCalender(c ...*gin.Context) template.HTML {
+	var storage Storage
+	if len(c) > 0 {
+		if istorage, exists := c[0].Get("storage"); exists {
+			storage = istorage.(Storage)
+		}
+	}
+	cal := calendar.NewCalendar()
+	cal.LinkFunc = func(t time.Time) string {
+		path := fmt.Sprintf("%04d-%02d-%02d", t.Year(), t.Month(), t.Day())
+		if storage == nil || storage.Exists(path+".md") {
+			return path
+		}
+		return ""
+	}
+	return template.HTML(cal.Html())
+}
+
 func initHttpd(storage Storage) *gin.Engine {
 	r := gin.Default()
 
 	r.SetFuncMap(template.FuncMap{
 		"markdown": markdownRenderer,
+		"calender": printCalender,
 	})
 	r.LoadHTMLGlob("static/*.html")
 
@@ -71,6 +90,7 @@ func initHttpd(storage Storage) *gin.Engine {
 
 	r.NoRoute(func(c *gin.Context) {
 		page := c.Request.URL.Path
+		c.Set("storage", storage)
 		if storage.Exists(page + ".md") {
 			// local file. TODO bytes := storage.Get(...)
 			if file, ok := storage.FilePath(page + ".md"); ok {
