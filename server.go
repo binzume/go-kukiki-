@@ -2,19 +2,24 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/binzume/go-calendar"
 	"github.com/binzume/go-markdown"
 	"github.com/gin-gonic/gin"
 )
+
+var pagePrefixBlacklist = []string{"/api/", "static", "/css/", "/js/"}
 
 func parseIntDefault(str string, defvalue int) int {
 	v, err := strconv.ParseInt(str, 10, 32)
@@ -72,6 +77,10 @@ func printCalender(c ...*gin.Context) template.HTML {
 	return template.HTML(cal.Html())
 }
 
+func pageFile(page string) string {
+	return page + ".md"
+}
+
 func initHttpd(storage Storage) *gin.Engine {
 	r := gin.Default()
 
@@ -84,17 +93,51 @@ func initHttpd(storage Storage) *gin.Engine {
 	r.Static("/css", "./static/css")
 	r.Static("/js", "./static/js")
 
-	r.GET("/status", func(c *gin.Context) {
+	r.GET("/api/status", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"_status": 200, "message": "It works!"})
 	})
 
+	r.GET("/api/pages/:page", func(c *gin.Context) {
+		page := pageFile(c.Param("page"))
+		if data, err := storage.Get(page); err == nil {
+			c.Data(http.StatusOK, "text/plain", data)
+		} else {
+			c.JSON(http.StatusOK, gin.H{"_status": 404, "message": "page not found"})
+		}
+	})
+
+	r.POST("/api/pages/:page", func(c *gin.Context) {
+		page := pageFile(c.Param("page"))
+		for _, prefix := range pagePrefixBlacklist {
+			if strings.HasPrefix(page, prefix) {
+				c.JSON(http.StatusOK, gin.H{"_status": 400, "message": "bad page name"})
+				return
+			}
+		}
+
+		if data, err := ioutil.ReadAll(c.Request.Body); err == nil {
+			var parsed map[string]string
+			err = json.Unmarshal(data, &parsed)
+			if err != nil {
+				fmt.Print(err)
+			}
+			storage.Store(page, []byte(parsed["text"]))
+		}
+
+		c.JSON(http.StatusOK, gin.H{"_status": 200, "message": "stored"})
+	})
+
 	r.NoRoute(func(c *gin.Context) {
-		page := c.Request.URL.Path
+		page := pageFile(c.Request.URL.Path)
+		if _, ok := c.GetQuery("edit"); ok {
+			pageName := strings.TrimLeft(c.Request.URL.Path, "/")
+			c.HTML(http.StatusOK, "editor.html", gin.H{"title": "It works!", "page": pageName, "ctx": c})
+			return
+		}
 		c.Set("storage", storage)
-		if storage.Exists(page + ".md") {
+		if storage.Exists(page) {
 			// local file. TODO bytes := storage.Get(...)
-			if file, ok := storage.FilePath(page + ".md"); ok {
-				fmt.Print(file)
+			if file, ok := storage.FilePath(page); ok {
 				c.Set("inputfile", file)
 				c.HTML(http.StatusOK, "template.html", gin.H{"title": "It works!", "ctx": c})
 				return

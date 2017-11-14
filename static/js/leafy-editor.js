@@ -1,5 +1,27 @@
 "use strict";
 
+var pageApi = "/api/pages/"
+
+function requestJson(method, url, f){
+	var xhr = new XMLHttpRequest();
+	xhr.open(method, url);
+	xhr.onreadystatechange = function() {
+		if (xhr.readyState != 4) return;
+		var json;
+		try {
+			JSON.parse(xhr.responseText);
+		} catch(e) {}
+		if (f) {
+			f(json, xhr)
+		}
+	};
+	return xhr;
+}
+
+function getJson(url,f){
+	requestJson('GET', url, f).send();
+}
+
 window.addEventListener('DOMContentLoaded',(function(e){
 	console.log("Hello, Leafy.");
 	var editor = {
@@ -23,5 +45,12 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		update();
 	}
 
-}),false);
+	document.getElementById('save-button').addEventListener('click', function(e){
+		e.preventDefault();
 
+		console.log("send");
+		var pagePath = document.getElementById('pagepath').value;
+		requestJson('POST', pageApi + pagePath, null).send(JSON.stringify({"text": editor.getValue()}));
+	});
+	
+}),false);

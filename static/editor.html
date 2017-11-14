@@ -3,18 +3,19 @@
 <head>
 	<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
-	<title>Leafy Editor</title>
-	<link rel="shortcut icon" href="./favicon.ico" type="image/x-icon" />
-	<link rel=stylesheet type="text/css" href="css/leafy.css" />
-	<script src="js/leafy-markdown.js"></script>
-	<script src="js/leafy-editor.js"></script>
+	<title>{{.title}} - Leafy Editor</title>
+	<link rel="shortcut icon" href="/favicon.ico" type="image/x-icon" />
+	<link rel=stylesheet type="text/css" href="/css/leafy.css" />
+	<script src="/js/leafy-markdown.js"></script>
+	<script src="/js/leafy-editor.js"></script>
 </head>
 <body>
 <header>
   Leafy Editor
 </header>
 
-https://leafy.kstm.org/sample/<input type="text" name="pagepath" value="ページ名" style="width: calc(100% - 200pt)" />
+Page: <input type="text" id="pagepath" value="{{.page}}" style="width: calc(100% - 200pt)" />
+<button id="save-button">Save</button>
 
 <div id="content" style="height:calc(100vh - 80pt);">
 
