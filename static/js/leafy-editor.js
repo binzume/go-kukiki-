@@ -4,12 +4,12 @@ var pageApi = "/api/pages/"
 
 function requestJson(method, url, f){
 	var xhr = new XMLHttpRequest();
-	xhr.open(method, url);
+	xhr.open(method, url, true);
 	xhr.onreadystatechange = function() {
 		if (xhr.readyState != 4) return;
-		var json;
+		var json = null;
 		try {
-			JSON.parse(xhr.responseText);
+			json = JSON.parse(xhr.responseText);
 		} catch(e) {}
 		if (f) {
 			f(json, xhr)
@@ -18,16 +18,19 @@ function requestJson(method, url, f){
 	return xhr;
 }
 
-function getJson(url,f){
-	requestJson('GET', url, f).send();
+function pageApiUrl(pagePath) {
+	pagePath = (pagePath || '').trim().replace(/^\/+/, '');
+	if (pagePath == '') return pageApi;
+	return pageApi + pagePath.split('/').map(encodeURIComponent).join('/');
 }
 
 window.addEventListener('DOMContentLoaded',(function(e){
-	console.log("Hello, Leafy.");
 	var editor = {
 		elem: document.getElementById('editor'),
-		getValue: function(){return editor.elem.value;}
+		getValue: function(){return editor.elem.value;},
+		setValue: function(value){editor.elem.value = value;}
 	};
+	var status = document.getElementById('save-status');
 	var update = function() {
 		var dom = markup(editor.getValue());
 		var e = document.getElementById('preview-pane');
@@ -38,19 +41,42 @@ window.addEventListener('DOMContentLoaded',(function(e){
 	if (window.CodeMirror) {
 		editor = CodeMirror.fromTextArea(document.getElementById('editor'));
 		editor.on("change", update);
-		update();
 	} else {
 		editor.elem.addEventListener('change', update);
 		editor.elem.addEventListener('keyup', update);
-		update();
 	}
+	update();
+
+	var pagePath = document.getElementById('pagepath').value;
+	var load = requestJson('GET', pageApiUrl(pagePath), function(json, xhr) {
+		if (xhr.status == 200) {
+			editor.setValue(xhr.responseText);
+			update();
+			status.textContent = '';
+		} else if (xhr.status == 404) {
+			// A missing page is a valid starting point for creating a new page.
+			editor.setValue('');
+			update();
+			status.textContent = 'New page';
+		} else {
+			status.textContent = (json && json.message) || 'Failed to load page';
+		}
+	});
+	load.send();
 
 	document.getElementById('save-button').addEventListener('click', function(e){
 		e.preventDefault();
 
-		console.log("send");
 		var pagePath = document.getElementById('pagepath').value;
-		requestJson('POST', pageApi + pagePath, null).send(JSON.stringify({"text": editor.getValue()}));
+		var save = requestJson('POST', pageApiUrl(pagePath), function(json, xhr) {
+			if (xhr.status >= 200 && xhr.status < 300) {
+				status.textContent = 'Saved';
+			} else {
+				status.textContent = (json && json.message) || 'Failed to save page';
+			}
+		});
+		save.setRequestHeader('Content-Type', 'application/json');
+		save.send(JSON.stringify({"text": editor.getValue()}));
 	});
 	
 }),false);

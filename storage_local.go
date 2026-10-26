@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -15,22 +14,65 @@ func NewLoacalStorage(path string) *LocalStorage {
 	return &LocalStorage{base: path, writable: true}
 }
 func (s *LocalStorage) Get(path string) ([]byte, error) {
-	return ioutil.ReadFile(s.resolve(path))
+	file, err := s.resolve(path)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(file)
 }
 func (s *LocalStorage) Store(path string, data []byte) error {
-	return ioutil.WriteFile(s.resolve(path), data, 0)
+	file, err := s.resolve(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(file, data, 0644)
 }
 func (s *LocalStorage) Exists(path string) bool {
-	_, err := os.Stat(s.resolve(path))
+	file, err := s.resolve(path)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(file)
 	return err == nil
 }
 func (s *LocalStorage) List(path string) []string {
-	return nil
+	directory := s.base
+	if path != "" && path != "/" {
+		resolved, err := s.resolve(path)
+		if err != nil {
+			return nil
+		}
+		directory = resolved
+	}
+
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			paths = append(paths, entry.Name())
+		}
+	}
+	return paths
 }
 func (s *LocalStorage) FilePath(path string) (fpath string, ok bool) {
-	return s.resolve(path), true
+	file, err := s.resolve(path)
+	if err != nil {
+		return "", false
+	}
+	return file, true
 }
 
-func (s *LocalStorage) resolve(path string) string {
-	return filepath.Join(s.base, filepath.Clean(path))
+func (s *LocalStorage) resolve(path string) (string, error) {
+	path, err := normalizeStoragePath(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(s.base, path), nil
 }

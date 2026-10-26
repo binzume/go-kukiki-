@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.title}}{{if .siteTitle}} - {{.siteTitle}}{{end}}</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .login {
+      box-sizing: border-box;
+      margin: 4rem auto;
+      max-width: 24rem;
+      padding: 2rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    .login h1 {
+      margin-top: 0;
+      font-size: 1.5rem;
+    }
+    .login label {
+      display: block;
+      margin-top: 1rem;
+    }
+    .login input {
+      box-sizing: border-box;
+      display: block;
+      margin-top: .35rem;
+      padding: .5rem;
+      width: 100%;
+    }
+    .login button {
+      margin-top: 1.25rem;
+      padding: .5rem 1rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="login">
+    <h1>ログイン</h1>
+    <form method="post" action="/login.html">
+      <label for="user">ユーザー名</label>
+      <input id="user" name="user" type="text" autocomplete="username" required>
+
+      <label for="password">パスワード</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+      <button type="submit">ログイン</button>
+    </form>
+  </main>
+</body>
+</html>
