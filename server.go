@@ -20,7 +20,6 @@ import (
 
 	"github.com/binzume/go-calendar"
 	"github.com/binzume/go-markdown"
-	"github.com/gin-gonic/gin"
 )
 
 var pagePrefixBlacklist = []string{"/api/", "static", "/css/", "/js/"}
@@ -78,6 +77,108 @@ func convertMarkdown(scanner *bufio.Scanner, writer markdown.DocWriter) error {
 	return md.Convert(scanner, writer)
 }
 
+func convertMarkdownReader(reader io.Reader, writer markdown.DocWriter) error {
+	return convertMarkdown(bufio.NewScanner(reader), writer)
+}
+
+type markdownSegment struct {
+	input   *io.PipeWriter
+	writer  *markdownLinkWriter
+	section int
+	done    chan error
+}
+
+var diarySectionIDPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-`)
+
+func sectionHTMLID(name string, diaryMode bool) string {
+	if diaryMode && len(name) > 8 && diarySectionIDPattern.MatchString(name) {
+		return name[8:]
+	}
+	return name
+}
+
+func startMarkdownSegment(out io.Writer, sectionName string, sectionEditURL func(string) string, diaryMode bool) *markdownSegment {
+	writer := &markdownLinkWriter{DocWriter: markdown.NewHTMLWriter(out)}
+	section := 0
+	if sectionName != "" {
+		sectionID := sectionHTMLID(sectionName, diaryMode)
+		section = writer.Block(markdown.MarkupData{
+			Attributes: markdown.Attributes(".section #" + sectionID),
+		})
+		title := writer.Heading(1, markdown.MarkupData{})
+		fmt.Fprintf(out, "<a href='#%s'>", template.HTMLEscapeString(sectionID))
+		writer.Write(sectionName)
+		io.WriteString(out, "</a>")
+		if sectionEditURL != nil {
+			url := template.HTMLEscapeString(sectionEditURL(sectionName))
+			fmt.Fprintf(out, " <a class='section-edit' href='%s'>Edit</a>", url)
+		}
+		writer.End(title)
+		writer.Write("\n")
+	}
+
+	reader, input := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- convertMarkdownReader(reader, writer)
+		_ = reader.Close()
+	}()
+	return &markdownSegment{input: input, writer: writer, section: section, done: done}
+}
+
+func (s *markdownSegment) close() error {
+	closeErr := s.input.Close()
+	convertErr := <-s.done
+	if s.section != 0 {
+		s.writer.End(s.section)
+	} else {
+		s.writer.Close()
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return convertErr
+}
+
+func renderMarkdownReader(reader io.Reader, out io.Writer, sectionEditURL func(string) string, diaryMode bool) error {
+	scanner := bufio.NewScanner(reader)
+	segment := startMarkdownSegment(out, "", sectionEditURL, diaryMode)
+	inCodeFence := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !inCodeFence {
+			section, ok, err := parseSectionHeader(line + "\n")
+			if err != nil {
+				_ = segment.close()
+				return err
+			}
+			if ok {
+				if err := segment.close(); err != nil {
+					return err
+				}
+				segment = startMarkdownSegment(out, section.Name, sectionEditURL, diaryMode)
+				continue
+			}
+		}
+
+		if _, err := io.WriteString(segment.input, line+"\n"); err != nil {
+			_ = segment.close()
+			return err
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inCodeFence = !inCodeFence
+		}
+	}
+
+	scanErr := scanner.Err()
+	segmentErr := segment.close()
+	if scanErr != nil {
+		return scanErr
+	}
+	return segmentErr
+}
+
 func renderMarkdownFile(path string, out io.Writer) error {
 	fp, err := os.Open(path)
 	if err != nil {
@@ -85,14 +186,7 @@ func renderMarkdownFile(path string, out io.Writer) error {
 	}
 	defer fp.Close()
 
-	scanner := bufio.NewScanner(fp)
-	writer := &markdownLinkWriter{DocWriter: markdown.NewHTMLWriter(out)}
-	err = convertMarkdown(scanner, writer)
-	writer.Close()
-	if err != nil {
-		return err
-	}
-	return scanner.Err()
+	return renderMarkdownReader(fp, out, nil, false)
 }
 
 func dataFilePath(storage Storage, requestPath string) (string, bool) {
@@ -122,13 +216,52 @@ func parseIntDefault(str string, defvalue int) int {
 	return int(v)
 }
 
-func markdownRenderer(c *gin.Context) template.HTML {
-	path := c.GetString("inputfile")
-	err := renderMarkdownFile(path, c.Writer)
-	if err != nil {
-		panic(err)
+type templateContext struct {
+	Request   *http.Request
+	Storage   Storage
+	Input     io.Reader
+	InputPath string
+	PagePath  string
+	Diary     bool
+}
+
+func markdownRenderer(c *templateContext) (template.HTML, error) {
+	if c == nil {
+		return "", errors.New("missing template context")
 	}
-	return ""
+
+	reader := c.Input
+	var file *os.File
+	if reader == nil {
+		var err error
+		file, err = os.Open(c.InputPath)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+		reader = file
+	}
+
+	var sectionEditURL func(string) string
+	if c.Request != nil && isLoggedIn(c.Request) {
+		sectionEditURL = func(name string) string {
+			u := *c.Request.URL
+			if c.PagePath != "" {
+				u.Path = "/" + c.PagePath
+			}
+			query := u.Query()
+			query.Set("edit", "")
+			query.Set("section", name)
+			u.RawQuery = query.Encode()
+			return u.String()
+		}
+	}
+
+	var out bytes.Buffer
+	if err := renderMarkdownReader(reader, &out, sectionEditURL, c.Diary); err != nil {
+		return "", err
+	}
+	return template.HTML(out.String()), nil
 }
 
 // markdownFile renders a fixed Markdown file for use in a template. The
@@ -141,16 +274,30 @@ func markdownFile(path string) (template.HTML, error) {
 	return template.HTML(out.String()), nil
 }
 
-func printCalender(c ...*gin.Context) template.HTML {
+func printCalender(c *templateContext) template.HTML {
 	var storage Storage
-	if len(c) > 0 {
-		if istorage, exists := c[0].Get("storage"); exists {
-			storage = istorage.(Storage)
-		}
+	diaryMode := false
+	pagePath := ""
+	if c != nil {
+		storage = c.Storage
+		diaryMode = c.Diary
+		pagePath = c.PagePath
 	}
 	cal := calendar.NewCalendar()
+	if diaryMode && pagePath != "" {
+		monthName := pagePath
+		if separator := strings.LastIndexByte(monthName, '/'); separator >= 0 {
+			monthName = monthName[separator+1:]
+		}
+		if month, err := time.ParseInLocation("2006-01", monthName, time.Local); err == nil {
+			cal.Date = month
+		}
+	}
 	cal.LinkFunc = func(t time.Time) string {
 		path := fmt.Sprintf("%04d-%02d-%02d", t.Year(), t.Month(), t.Day())
+		if diaryMode && pagePath != "" {
+			return "/" + pagePath + "#" + sectionHTMLID(path, true)
+		}
 		if storage == nil || storage.Exists(path+".md") {
 			return path
 		}
@@ -276,8 +423,8 @@ func buildBreadcrumbsWithConfig(storage Storage, pagePath, siteTitle string, con
 	return breadcrumbs
 }
 
-func editPageURL(c *gin.Context) string {
-	u := *c.Request.URL
+func editPageURL(r *http.Request) string {
+	u := *r.URL
 	query := u.Query()
 	query.Set("edit", "")
 	u.RawQuery = query.Encode()
@@ -356,160 +503,339 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ".", 302)
 }
 
-func initHttpd(storage Storage, config *Config) *gin.Engine {
-	r := gin.Default()
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
 
-	r.SetFuncMap(template.FuncMap{
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    "",
+		MaxAge:   -1,
+		Secure:   r.TLS != nil,
+		HttpOnly: true,
+		Path:     "/",
+	})
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		response := &loggingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(response, r)
+
+		status := response.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		log.Printf("%s %s %d %s", r.Method, r.URL.Path, status, time.Since(start))
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func firstQueryValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func writeText(w http.ResponseWriter, status int, data []byte) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
+func apiPagePath(r *http.Request) string {
+	page := r.PathValue("page")
+	if page == "" {
+		return "/"
+	}
+	return page
+}
+
+func executeTemplate(w http.ResponseWriter, templates *template.Template, status int, name string, data any) {
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, name, data); err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(output.Bytes())
+}
+
+// templateData adds site-wide variables to the data passed to a template.
+// Variables are available both under .variables and by their name (for
+// example, .variables.author and .author). Explicit template data wins over
+// a variable with the same name, so variables cannot replace built-in values
+// such as .title or .ctx.
+func templateData(config *Config, data map[string]any) map[string]any {
+	result := make(map[string]any, len(data)+len(config.Variables)+1)
+	for key, value := range data {
+		result[key] = value
+	}
+	result["variables"] = config.Variables
+	for key, value := range config.Variables {
+		if _, exists := result[key]; !exists {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func initHttpd(storage Storage, config *Config) http.Handler {
+	templates, err := template.New("root").Funcs(template.FuncMap{
 		"markdown":     markdownRenderer,
 		"markdownFile": markdownFile,
 		"calender":     printCalender,
-	})
-	r.LoadHTMLGlob("static/*.html")
+	}).ParseGlob("static/*.html")
+	if err != nil {
+		panic(err)
+	}
 
-	r.Static("/css", "./static/css")
-	r.Static("/js", "./static/js")
+	mux := http.NewServeMux()
 
-	r.GET("/login.html", func(c *gin.Context) {
-		c.HTML(http.StatusOK, "login.html", gin.H{
+	mux.Handle("/css/", http.StripPrefix("/css/", http.FileServer(http.Dir("./static/css"))))
+	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServer(http.Dir("./static/js"))))
+
+	mux.HandleFunc("GET /login.html", func(w http.ResponseWriter, r *http.Request) {
+		executeTemplate(w, templates, http.StatusOK, "login.html", templateData(config, map[string]any{
 			"title":     "Login",
 			"siteTitle": config.siteTitle(config.Default),
-		})
+			"loggedIn":  isLoggedIn(r),
+		}))
 	})
-	r.POST("/login.html", func(c *gin.Context) {
-		loginHandler(c.Writer, c.Request)
+	mux.HandleFunc("POST /login.html", loginHandler)
+	mux.HandleFunc("GET /logout", logoutHandler)
+
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "It works!"})
 	})
 
-	r.GET("/api/status", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"_status": 200, "message": "It works!"})
-	})
-
-	r.GET("/api/pages/*page", func(c *gin.Context) {
-		page, err := pageFile(c.Param("page"))
+	mux.HandleFunc("GET /api/pages/{page...}", func(w http.ResponseWriter, r *http.Request) {
+		page, err := pageFile(apiPagePath(r))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"_status": 400, "message": err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
+			return
+		}
+		if sectionName, ok := r.URL.Query()["section"]; ok {
+			section, err := readSection(storage, page, firstQueryValue(sectionName))
+			if err != nil {
+				if errors.Is(err, ErrSectionNotFound) || os.IsNotExist(err) {
+					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
+					return
+				}
+				if strings.HasPrefix(err.Error(), "invalid section name:") {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to read section"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"section":      section.Name,
+				"updateUnixMS": section.UpdateUnixMS,
+				"text":         section.Body,
+			})
 			return
 		}
 		if data, err := storage.Get(page); err == nil {
-			c.Data(http.StatusOK, "text/plain", data)
+			writeText(w, http.StatusOK, data)
 		} else if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"_status": 404, "message": "page not found"})
+			writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "page not found"})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"_status": 500, "message": "failed to read page"})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to read page"})
 		}
 	})
 
-	r.POST("/api/pages/*page", func(c *gin.Context) {
-		if !isLoggedIn(c.Request) {
-			c.JSON(http.StatusUnauthorized, gin.H{"_status": 401, "message": "authentication required"})
+	mux.HandleFunc("POST /api/pages/{page...}", func(w http.ResponseWriter, r *http.Request) {
+		if !isLoggedIn(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"_status": 401, "message": "authentication required"})
 			return
 		}
-		page, err := pageFile(c.Param("page"))
+		page, err := pageFile(apiPagePath(r))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"_status": 400, "message": err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
 			return
 		}
 		if isBlockedPage(page) {
-			c.JSON(http.StatusBadRequest, gin.H{"_status": 400, "message": "bad page name"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad page name"})
 			return
 		}
 
 		var parsed struct {
-			Text *string `json:"text"`
+			Text         *string `json:"text"`
+			UpdateUnixMS int64   `json:"updateUnixMS"`
 		}
-		decoder := json.NewDecoder(c.Request.Body)
+		decoder := json.NewDecoder(r.Body)
 		if err := decoder.Decode(&parsed); err != nil || parsed.Text == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"_status": 400, "message": "request body must contain a text field"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "request body must contain a text field"})
 			return
 		}
-		var extra interface{}
+		var extra any
 		if err := decoder.Decode(&extra); err != io.EOF {
-			c.JSON(http.StatusBadRequest, gin.H{"_status": 400, "message": "request body must contain a single JSON object"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "request body must contain a single JSON object"})
 			return
 		}
-		if err := storage.Store(page, []byte(*parsed.Text)); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"_status": 500, "message": "failed to store page"})
+		if sectionValues, ok := r.URL.Query()["section"]; ok {
+			if err := updateSection(storage, page, firstQueryValue(sectionValues), *parsed.Text, parsed.UpdateUnixMS); err != nil {
+				switch {
+				case errors.Is(err, ErrSectionNotFound), os.IsNotExist(err):
+					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
+				case errors.Is(err, ErrWritableFS):
+					writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "section updates are not supported"})
+				default:
+					if strings.HasPrefix(err.Error(), "invalid section name:") || strings.HasPrefix(err.Error(), "invalid section update timestamp:") {
+						writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
+					} else {
+						writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to update section"})
+					}
+				}
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "stored"})
+			return
+		}
+		if err := writePage(storage, page, []byte(*parsed.Text)); err != nil {
+			if errors.Is(err, ErrWritableFS) {
+				writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "page updates are not supported"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to store page"})
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"_status": 200, "message": "stored"})
+		writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "stored"})
 	})
 
-	r.NoRoute(func(c *gin.Context) {
-		if file, ok := dataFilePath(storage, c.Request.URL.Path); ok {
-			c.File(file)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if file, ok := dataFilePath(storage, r.URL.Path); ok {
+			http.ServeFile(w, r, file)
 			return
 		}
-		page, conf, err := resolvePageFile(storage, c.Request.URL.Path, config)
+		page, conf, err := resolvePageFile(storage, r.URL.Path, config)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"_status": 400, "message": err.Error()})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
 			return
 		}
-		if _, ok := c.GetQuery("edit"); ok {
-			if !isLoggedIn(c.Request) {
-				c.Redirect(http.StatusFound, "/login.html")
+		if _, ok := r.URL.Query()["edit"]; ok {
+			if !isLoggedIn(r) {
+				http.Redirect(w, r, "/login.html", http.StatusFound)
 				return
 			}
-			if strings.HasSuffix(c.Request.URL.Path, "/") {
-				target := strings.TrimRight(c.Request.URL.Path, "/") + "/index"
-				if c.Request.URL.RawQuery != "" {
-					target += "?" + c.Request.URL.RawQuery
+			if strings.HasSuffix(r.URL.Path, "/") {
+				target := strings.TrimRight(r.URL.Path, "/") + "/index"
+				if conf.Diary {
+					target = strings.TrimRight(r.URL.Path, "/") + "/" + time.Now().Format("2006-01")
 				}
-				c.Redirect(http.StatusPermanentRedirect, target)
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, target, http.StatusPermanentRedirect)
 				return
 			}
-			pageName := strings.TrimLeft(c.Request.URL.Path, "/")
+			pageName := strings.TrimLeft(r.URL.Path, "/")
 			if pageName == "" {
 				pageName = "/"
 			}
-			c.HTML(http.StatusOK, "editor.html", gin.H{
+			executeTemplate(w, templates, http.StatusOK, "editor.html", templateData(config, map[string]any{
 				"title":     "It works!",
 				"siteTitle": config.siteTitle(config.Default),
 				"page":      pageName,
-				"ctx":       c,
-			})
+				"section":   r.URL.Query().Get("section"),
+				"loggedIn":  true,
+			}))
 			return
 		}
-		c.Set("storage", storage)
+
 		if storage.Exists(page) {
-			// local file. TODO bytes := storage.Get(...)
-			if file, ok := storage.FilePath(page); ok {
-				fp, err := os.Open(file)
+			storageName, err := normalizeFSPath(page)
+			if err == nil {
+				fp, err := storage.Open(storageName)
 				if err != nil {
-					panic(err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
 				}
 				defer fp.Close()
 				parser := NewParser(fp)
 				headers := parser.ParseHeader()
-				c.Set("inputreader", parser)
-				c.Set("inputfile", file)
-				pageData := gin.H{
+				pagePath := strings.TrimSuffix(strings.TrimPrefix(page, "/"), ".md")
+				pageContext := &templateContext{
+					Request:   r,
+					Storage:   storage,
+					Input:     parser,
+					InputPath: storageName,
+					PagePath:  pagePath,
+					Diary:     conf.Diary,
+				}
+				loggedIn := isLoggedIn(r)
+				pageData := templateData(config, map[string]any{
 					"title":     headers["title"],
 					"siteTitle": config.siteTitle(conf),
+					"loggedIn":  loggedIn,
 					"breadcrumbs": buildBreadcrumbsWithConfig(
 						storage,
 						page,
 						config.siteTitle(conf),
 						config,
 					),
-					"ctx":    c,
+					"ctx":    pageContext,
 					"config": conf,
+				})
+				if loggedIn {
+					pageData["editURL"] = editPageURL(r)
 				}
-				if isLoggedIn(c.Request) {
-					pageData["editURL"] = editPageURL(c)
-				}
-				c.HTML(http.StatusOK, conf.Template, pageData)
+				executeTemplate(w, templates, http.StatusOK, conf.Template, pageData)
 				return
 			}
 		}
-		c.Set("inputfile", "static/404.md")
-		c.HTML(http.StatusOK, config.Default.Template, gin.H{
+
+		executeTemplate(w, templates, http.StatusNotFound, config.Default.Template, templateData(config, map[string]any{
 			"title":     "404 Not Found",
 			"siteTitle": config.siteTitle(config.Default),
-			"ctx":       c,
-		})
+			"loggedIn":  isLoggedIn(r),
+			"ctx": &templateContext{
+				Request:   r,
+				Storage:   storage,
+				InputPath: "static/404.md",
+			},
+			"config": config.Default,
+		}))
 	})
 
-	return r
+	return loggingMiddleware(mux)
 }
 
 func main() {
@@ -529,7 +855,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	gin.SetMode(gin.ReleaseMode)
 	log.Printf("start server. port: %d", *port)
-	initHttpd(NewLoacalStorage(*dbpath), config).Run(":" + fmt.Sprint(*port))
+	server := &http.Server{
+		Addr:    ":" + fmt.Sprint(*port),
+		Handler: initHttpd(NewLoacalStorage(*dbpath), config),
+	}
+	log.Fatal(server.ListenAndServe())
 }

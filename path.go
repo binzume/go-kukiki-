@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
@@ -38,4 +39,19 @@ func normalizeStoragePath(path string) (string, error) {
 		return "", fmt.Errorf("invalid storage path: %q", path)
 	}
 	return clean, nil
+}
+
+func normalizeFSPath(path string) (string, error) {
+	if path == "." {
+		return path, nil
+	}
+	path, err := normalizeStoragePath(path)
+	if err != nil {
+		return "", err
+	}
+	path = filepath.ToSlash(path)
+	if !fs.ValidPath(path) {
+		return "", fmt.Errorf("invalid fs path: %q", path)
+	}
+	return path, nil
 }

@@ -5,12 +5,25 @@
   <meta http-equiv="Content-Script-Type" content="text/javascript" />
   <meta http-equiv="Content-Style-Type" content="text/css" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-  <title>{{ .title }}</title>
+  <title>{{ .title }}{{if .siteTitle}} - {{.siteTitle}}{{end}}</title>
   <link rel="stylesheet" href="/css/style.css">
  </head>
  <body>
-
-<div class="gomd">
+{{if .loggedIn}}
+<nav class="account-nav" aria-label="Account"><a href="/logout">ログアウト</a></nav>
+{{end}}
+{{if .editURL}}
+<nav><a href="{{.editURL}}">Edit</a></nav>
+{{end}}
+{{if .breadcrumbs}}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+{{range $index, $item := .breadcrumbs}}{{if $index}} / {{end}}<a href="{{$item.URL}}">{{$item.Title}}</a>{{end}} /
+</nav>
+{{end}}
+<aside class="side-menu">
+{{markdownFile "static/menu.md"}}
+</aside>
+<div id="content">
 {{.ctx | markdown}}
 </div>
 

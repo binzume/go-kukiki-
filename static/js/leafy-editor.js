@@ -24,6 +24,12 @@ function pageApiUrl(pagePath) {
 	return pageApi + pagePath.split('/').map(encodeURIComponent).join('/');
 }
 
+function sectionApiUrl(pagePath, sectionName) {
+	var url = pageApiUrl(pagePath);
+	if ((sectionName || '').trim() == '') return url;
+	return url + '?section=' + encodeURIComponent(sectionName.trim());
+}
+
 window.addEventListener('DOMContentLoaded',(function(e){
 	var editor = {
 		elem: document.getElementById('editor'),
@@ -31,6 +37,8 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		setValue: function(value){editor.elem.value = value;}
 	};
 	var status = document.getElementById('save-status');
+	var sectionInput = document.getElementById('sectionpath');
+	var sectionUpdateUnixMS = 0;
 	var update = function() {
 		var dom = markup(editor.getValue());
 		var e = document.getElementById('preview-pane');
@@ -47,28 +55,41 @@ window.addEventListener('DOMContentLoaded',(function(e){
 	}
 	update();
 
-	var pagePath = document.getElementById('pagepath').value;
-	var load = requestJson('GET', pageApiUrl(pagePath), function(json, xhr) {
+	var pagePath = document.getElementById('pagepath').textContent.trim();
+	var loadSection = function() {
+		var sectionName = sectionInput.value.trim();
+		var load = requestJson('GET', sectionApiUrl(pagePath, sectionName), function(json, xhr) {
 		if (xhr.status == 200) {
-			editor.setValue(xhr.responseText);
+			if (sectionName != '') {
+				sectionUpdateUnixMS = (json && json.updateUnixMS) || 0;
+				editor.setValue((json && json.text) || '');
+			} else {
+				sectionUpdateUnixMS = 0;
+				editor.setValue(xhr.responseText);
+			}
 			update();
 			status.textContent = '';
 		} else if (xhr.status == 404) {
 			// A missing page is a valid starting point for creating a new page.
 			editor.setValue('');
+			sectionUpdateUnixMS = 0;
 			update();
-			status.textContent = 'New page';
+			status.textContent = sectionName != '' ? 'New section' : 'New page';
 		} else {
 			status.textContent = (json && json.message) || 'Failed to load page';
 		}
 	});
-	load.send();
+		load.send();
+	};
+	loadSection();
+	sectionInput.addEventListener('change', loadSection);
 
 	document.getElementById('save-button').addEventListener('click', function(e){
 		e.preventDefault();
 
-		var pagePath = document.getElementById('pagepath').value;
-		var save = requestJson('POST', pageApiUrl(pagePath), function(json, xhr) {
+		var pagePath = document.getElementById('pagepath').textContent.trim();
+		var sectionName = sectionInput.value.trim();
+		var save = requestJson('POST', sectionApiUrl(pagePath, sectionName), function(json, xhr) {
 			if (xhr.status >= 200 && xhr.status < 300) {
 				status.textContent = 'Saved';
 			} else {
@@ -76,7 +97,9 @@ window.addEventListener('DOMContentLoaded',(function(e){
 			}
 		});
 		save.setRequestHeader('Content-Type', 'application/json');
-		save.send(JSON.stringify({"text": editor.getValue()}));
+		var payload = {"text": editor.getValue()};
+		if (sectionName != '') payload.updateUnixMS = sectionUpdateUnixMS;
+		save.send(JSON.stringify(payload));
 	});
 	
 }),false);

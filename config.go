@@ -8,6 +8,7 @@ type Config struct {
 	// section below for compatibility with the existing config file layout.
 	Title     string
 	Kukiki    SiteConfig
+	Variables map[string]any
 	Default   DirConfig
 	Overrides []DirConfig
 }

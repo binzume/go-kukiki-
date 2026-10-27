@@ -33,7 +33,11 @@ func (r *Parser) ParseHeader() map[string]string {
 			if _, ok := h["title"]; !ok && strings.HasPrefix(text, "# ") {
 				h["title"] = text[2:]
 			}
-			r.buf = r.scanner.Bytes()
+			// Preserve the line separator when replaying the first non-header
+			// line. Without it, a block directive at the start of a document
+			// gets joined with the following line.
+			r.buf = append([]byte(nil), r.scanner.Bytes()...)
+			r.buf = append(r.buf, '\n')
 			break
 		}
 	}

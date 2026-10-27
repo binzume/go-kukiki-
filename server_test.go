@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -19,7 +20,6 @@ func TestServer(t *testing.T) {
 	storage := NewLoacalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 
-	// gin.SetMode(gin.ReleaseMode)
 	ts := httptest.NewServer(initHttpd(storage, config))
 	defer ts.Close()
 
@@ -62,13 +62,61 @@ func TestDataFileIsServed(t *testing.T) {
 	}
 }
 
-func TestPageAPI(t *testing.T) {
+func TestMissingPageReturnsNotFound(t *testing.T) {
 	storage := NewLoacalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	ts := httptest.NewServer(initHttpd(storage, config))
 	defer ts.Close()
 
-	rootRes, err := http.Post(ts.URL+"/api/pages/", "application/json", strings.NewReader(`{"text":"# Root"}`))
+	res, err := http.Get(ts.URL + "/docs/missing")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading response failed: %v", err)
+	}
+	if !strings.Contains(string(body), "404 Not Found") {
+		t.Errorf("response does not contain the 404 page: %s", body)
+	}
+}
+
+func enableTestAuth(t *testing.T) *http.Cookie {
+	previousAuth := auth
+	auth = &AuthConfig{
+		SessionSecret: "test-session-secret",
+		Accounts:      []AccountConfig{{Name: "admin", AuthType: "INSECURE", Secret: "password"}},
+	}
+	t.Cleanup(func() { auth = previousAuth })
+	return &http.Cookie{
+		Name:  SessionCookieName,
+		Value: auth.CreateSessionString(&auth.Accounts[0]),
+		Path:  "/",
+	}
+}
+
+func TestPageAPI(t *testing.T) {
+	storage := NewLoacalStorage(t.TempDir())
+	config := &Config{Default: DirConfig{Template: "template.html"}}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+	cookie := enableTestAuth(t)
+	do := func(method, url string, body io.Reader) (*http.Response, error) {
+		request, err := http.NewRequest(method, url, body)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.AddCookie(cookie)
+		return http.DefaultClient.Do(request)
+	}
+
+	rootRes, err := do(http.MethodPost, ts.URL+"/api/pages/", strings.NewReader(`{"text":"# Root"}`))
 	if err != nil {
 		t.Fatalf("root post failed: %v", err)
 	}
@@ -80,9 +128,9 @@ func TestPageAPI(t *testing.T) {
 		t.Fatalf("stored root page = %q, err = %v", data, err)
 	}
 
-	res, err := http.Post(
+	res, err := do(
+		http.MethodPost,
 		ts.URL+"/api/pages/docs/guide",
-		"application/json",
 		strings.NewReader(`{"text":"# Guide"}`),
 	)
 	if err != nil {
@@ -109,7 +157,7 @@ func TestPageAPI(t *testing.T) {
 		t.Fatalf("get response = (%d, %q), want (%d, %q)", res.StatusCode, body, http.StatusOK, "# Guide")
 	}
 
-	res, err = http.Post(ts.URL+"/api/pages/docs/bad", "application/json", strings.NewReader("{"))
+	res, err = do(http.MethodPost, ts.URL+"/api/pages/docs/bad", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("invalid post failed: %v", err)
 	}
@@ -118,7 +166,7 @@ func TestPageAPI(t *testing.T) {
 		t.Errorf("invalid JSON status = %d, want %d", res.StatusCode, http.StatusBadRequest)
 	}
 
-	res, err = http.Post(ts.URL+"/api/pages/docs/bad", "application/json", strings.NewReader(`{"title":"missing text"}`))
+	res, err = do(http.MethodPost, ts.URL+"/api/pages/docs/bad", strings.NewReader(`{"title":"missing text"}`))
 	if err != nil {
 		t.Fatalf("missing text post failed: %v", err)
 	}
@@ -139,13 +187,98 @@ func TestPageAPI(t *testing.T) {
 	failing := &failingStorage{Storage: storage}
 	failingServer := httptest.NewServer(initHttpd(failing, config))
 	defer failingServer.Close()
-	res, err = http.Post(failingServer.URL+"/api/pages/docs/fail", "application/json", strings.NewReader(`{"text":"fail"}`))
+	res, err = do(http.MethodPost, failingServer.URL+"/api/pages/docs/fail", strings.NewReader(`{"text":"fail"}`))
 	if err != nil {
 		t.Fatalf("store failure post failed: %v", err)
 	}
 	res.Body.Close()
-	if res.StatusCode != http.StatusInternalServerError {
-		t.Errorf("store failure status = %d, want %d", res.StatusCode, http.StatusInternalServerError)
+	if res.StatusCode != http.StatusNotImplemented {
+		t.Errorf("store failure status = %d, want %d", res.StatusCode, http.StatusNotImplemented)
+	}
+}
+
+func TestSectionAPI(t *testing.T) {
+	storage := NewLoacalStorage(t.TempDir())
+	if err := storage.Store("diary/2025-10.md", []byte("preamble\n#[today#1730000000000]\nold text\n\n#[other]\nkeep text\n")); err != nil {
+		t.Fatalf("storage.Store returned an error: %v", err)
+	}
+	config := &Config{Default: DirConfig{Template: "template.html"}}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/api/pages/diary/2025-10?section=today")
+	if err != nil {
+		t.Fatalf("section get failed: %v", err)
+	}
+	var got struct {
+		Section      string `json:"section"`
+		UpdateUnixMS int64  `json:"updateUnixMS"`
+		Text         string `json:"text"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		res.Body.Close()
+		t.Fatalf("decoding section response failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("section get status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if got.Section != "today" || got.UpdateUnixMS != 1730000000000 || got.Text != "old text\n\n" {
+		t.Errorf("section response = %#v", got)
+	}
+
+	previousAuth := auth
+	auth = &AuthConfig{
+		SessionSecret: "section-test-secret",
+		Accounts:      []AccountConfig{{Name: "admin", AuthType: "INSECURE", Secret: "password"}},
+	}
+	defer func() { auth = previousAuth }()
+	request, err := http.NewRequest(http.MethodPost, ts.URL+"/api/pages/diary/2025-10?section=today", strings.NewReader(`{"text":"new text","updateUnixMS":0}`))
+	if err != nil {
+		t.Fatalf("section save request creation failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])})
+	res, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("section save failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("section save status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+
+	data, err := storage.Get("diary/2025-10.md")
+	if err != nil {
+		t.Fatalf("reading updated page failed: %v", err)
+	}
+	want := "preamble\n#[today]\nnew text\n#[other]\nkeep text\n"
+	if string(data) != want {
+		t.Errorf("updated page = %q, want %q", data, want)
+	}
+
+	request, err = http.NewRequest(http.MethodPost, ts.URL+"/api/pages/diary/2025-10?section=new_section", strings.NewReader(`{"text":"added text","updateUnixMS":0}`))
+	if err != nil {
+		t.Fatalf("new section request creation failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])})
+	res, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("new section save failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("new section save status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+
+	data, err = storage.Get("diary/2025-10.md")
+	if err != nil {
+		t.Fatalf("reading page after new section failed: %v", err)
+	}
+	want = "preamble\n#[today]\nnew text\n#[other]\nkeep text\n#[new_section]\nadded text\n"
+	if string(data) != want {
+		t.Errorf("page after new section = %q, want %q", data, want)
 	}
 }
 
@@ -153,8 +286,10 @@ func TestEditDirectoryRedirect(t *testing.T) {
 	storage := NewLoacalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	r := initHttpd(storage, config)
+	cookie := enableTestAuth(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/dir/?edit&from=test", nil)
+	req.AddCookie(cookie)
 	res := httptest.NewRecorder()
 	r.ServeHTTP(res, req)
 
@@ -174,8 +309,14 @@ func TestExistingPageHasEditLink(t *testing.T) {
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	ts := httptest.NewServer(initHttpd(storage, config))
 	defer ts.Close()
+	cookie := enableTestAuth(t)
 
-	res, err := http.Get(ts.URL + "/docs/guide?from=test")
+	request, err := http.NewRequest(http.MethodGet, ts.URL+"/docs/guide?from=test", nil)
+	if err != nil {
+		t.Fatalf("request creation failed: %v", err)
+	}
+	request.AddCookie(cookie)
+	res, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("get failed: %v", err)
 	}
@@ -233,6 +374,55 @@ func TestLoadConfigSiteTitle(t *testing.T) {
 	}
 	if got := config.siteTitle(config.Default); got != "Configured title" {
 		t.Errorf("site title = %q, want %q", got, "Configured title")
+	}
+}
+
+func TestTemplateVariables(t *testing.T) {
+	configPath := t.TempDir() + "/kukiki.toml"
+	if err := os.WriteFile(configPath, []byte("[variables]\nauthor = \"binzume\"\n"), 0644); err != nil {
+		t.Fatalf("os.WriteFile returned an error: %v", err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned an error: %v", err)
+	}
+	if got := config.Variables["author"]; got != "binzume" {
+		t.Errorf("variable author = %#v, want %q", got, "binzume")
+	}
+
+	data := templateData(config, map[string]any{"title": "Page"})
+	if got := data["author"]; got != "binzume" {
+		t.Errorf("direct template variable = %#v, want %q", got, "binzume")
+	}
+	variables, ok := data["variables"].(map[string]any)
+	if !ok || variables["author"] != "binzume" {
+		t.Errorf("namespaced template variable = %#v, want %q", data["variables"], "binzume")
+	}
+	if got := templateData(config, map[string]any{"author": "page author"})["author"]; got != "page author" {
+		t.Errorf("explicit template data was overwritten: %#v", got)
+	}
+}
+
+func TestTemplateVariablesAreRendered(t *testing.T) {
+	storage := NewLoacalStorage(t.TempDir())
+	if err := storage.Store("index.md", []byte("# Home")); err != nil {
+		t.Fatalf("storage.Store returned an error: %v", err)
+	}
+	config := &Config{
+		Variables: map[string]any{"author": "binzume"},
+		Default:   DirConfig{Template: "binzume.html"},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	initHttpd(storage, config).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "Copyright © binzume all rights reserved.") {
+		t.Errorf("template variable is missing from rendered page: %s", response.Body.String())
 	}
 }
 
@@ -397,6 +587,60 @@ func TestEditingRequiresLogin(t *testing.T) {
 	}
 }
 
+func TestLogoutClearsSessionAndRedirects(t *testing.T) {
+	previousAuth := auth
+	auth = &AuthConfig{SessionSecret: "test-session-secret"}
+	defer func() { auth = previousAuth }()
+
+	request := httptest.NewRequest(http.MethodGet, "/logout", nil)
+	response := httptest.NewRecorder()
+	initHttpd(NewLoacalStorage(t.TempDir()), &Config{Default: DirConfig{Template: "template.html"}}).ServeHTTP(response, request)
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("logout status = %d, want %d", response.Code, http.StatusFound)
+	}
+	if location := response.Header().Get("Location"); location != "/" {
+		t.Errorf("logout location = %q, want %q", location, "/")
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("logout set %d cookies, want 1", len(cookies))
+	}
+	if cookie := cookies[0]; cookie.Name != SessionCookieName || cookie.MaxAge >= 0 || cookie.Path != "/" {
+		t.Errorf("logout cookie = %#v, want expired %s cookie at /", cookie, SessionCookieName)
+	}
+}
+
+func TestLogoutLinkOnlyAppearsForAuthenticatedPages(t *testing.T) {
+	previousAuth := auth
+	auth = &AuthConfig{
+		SessionSecret: "test-session-secret",
+		Accounts:      []AccountConfig{{Name: "admin", AuthType: "INSECURE", Secret: "password"}},
+	}
+	defer func() { auth = previousAuth }()
+
+	storage := NewLoacalStorage(t.TempDir())
+	if err := storage.Store("index.md", []byte("# Home")); err != nil {
+		t.Fatalf("storage.Store returned an error: %v", err)
+	}
+	r := initHttpd(storage, &Config{Default: DirConfig{Template: "template.html"}})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if strings.Contains(response.Body.String(), `href="/logout"`) {
+		t.Errorf("unauthenticated page contains a logout link: %s", response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])})
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), `<a href="/logout">ログアウト</a>`) {
+		t.Errorf("authenticated page is missing the logout link: %s", response.Body.String())
+	}
+}
+
 type failingStorage struct {
 	Storage
 }
@@ -555,6 +799,55 @@ func TestBlockDirective(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownSectionsFromParserReader(t *testing.T) {
+	parser := NewParser(strings.NewReader("&title:Diary\n\n#[today]\n\nToday\n\n#[tomorrow#1730000000000]\nTomorrow"))
+	headers := parser.ParseHeader()
+	if headers["title"] != "Diary" {
+		t.Fatalf("title = %q, want %q", headers["title"], "Diary")
+	}
+
+	var output bytes.Buffer
+	if err := renderMarkdownReader(parser, &output, nil, false); err != nil {
+		t.Fatalf("renderMarkdownReader returned an error: %v", err)
+	}
+
+	got := output.String()
+	for _, want := range []string{
+		"<div class='section' id='today'>",
+		"<h1><a href='#today'>today</a></h1>",
+		"<p>Today</p>",
+		"<div class='section' id='tomorrow'>",
+		"<h1><a href='#tomorrow'>tomorrow</a></h1>",
+		"<p>Tomorrow</p>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered sections are missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestRenderMarkdownDiarySectionIDs(t *testing.T) {
+	var output bytes.Buffer
+	if err := renderMarkdownReader(
+		strings.NewReader("#[2026-10-27]\n\nEntry"),
+		&output,
+		nil,
+		true,
+	); err != nil {
+		t.Fatalf("renderMarkdownReader returned an error: %v", err)
+	}
+
+	got := output.String()
+	for _, want := range []string{
+		"<div class='section' id='27'>",
+		"<h1><a href='#27'>2026-10-27</a></h1>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("diary section rendering is missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestIDDirective(t *testing.T) {
 	var output bytes.Buffer
 	writer := markdown.NewHTMLWriter(&output)
@@ -586,7 +879,7 @@ func TestMarkdownFile(t *testing.T) {
 	if !strings.Contains(string(got), "<h1>Menu</h1>") {
 		t.Errorf("rendered heading is missing: %s", got)
 	}
-	if !strings.Contains(string(got), "href='/index.html'") {
+	if !strings.Contains(string(got), "href='/'") {
 		t.Errorf("rendered link was not rewritten: %s", got)
 	}
 }
