@@ -3,6 +3,12 @@
 	color: #222222;
     font: 14px/1.4 Verdana, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
 }
+
+.page-links {
+	display: flex;
+	justify-content: space-between;
+	margin: 0 0 0.5em;
+}
 #content h1,#content h2,#content h3,#content h4 {
 	font-weight: bold;
 	padding: 0pt;

@@ -38,6 +38,13 @@ function pageDirectory(pagePath) {
 	return parts.join('/');
 }
 
+function pageFileName(pagePath) {
+	var normalized = (pagePath || '').trim().replace(/^\/+|\/+$/g, '');
+	if (normalized == '') return 'index';
+	var parts = normalized.split('/');
+	return parts[parts.length - 1].replace(/\.html$/i, '') || 'index';
+}
+
 function fileApiUrl(directory, filename) {
 	var parts = ['/api/files'];
 	if ((directory || '') != '') {
@@ -49,10 +56,11 @@ function fileApiUrl(directory, filename) {
 	}).join('/');
 }
 
-function markdownLinkForFile(filename) {
+function markdownLinkForFile(filename, relativeDirectory) {
 	var imageExtensions = /\.(?:apng|avif|bmp|gif|heic|heif|ico|jpe?g|jxl|png|svg|tif?f|webp)$/i;
 	var escapedFilename = filename.replace(/[\\\[\]()]/g, '\\$&');
-	var linkTarget = encodeURIComponent(filename);
+	var linkPath = relativeDirectory == '' ? filename : relativeDirectory + '/' + filename;
+	var linkTarget = linkPath.split('/').map(encodeURIComponent).join('/');
 	var prefix = imageExtensions.test(filename) ? '!' : '';
 	return prefix + '[' + escapedFilename + '](' + linkTarget + ')';
 }
@@ -86,7 +94,21 @@ window.addEventListener('DOMContentLoaded',(function(e){
 	var uploadDirectory = pageDirectory(pagePath);
 	var uploadButton = document.getElementById('upload-button');
 	var uploadInput = document.getElementById('file-upload');
-	var dropZone = document.getElementById('file-drop-zone');
+	var uploadDirectorySelect = document.getElementById('file-upload-directory');
+	var editorDropTarget = editor.getWrapperElement ? editor.getWrapperElement() : editor.elem;
+	var pageFile = pageFileName(pagePath);
+	var pageSubdirectory = uploadDirectory == '' ? pageFile : uploadDirectory + '/' + pageFile;
+	var uploadDirectories = [pageSubdirectory, uploadDirectory];
+	var directoryLabels = [
+		pageSubdirectory + '/',
+		uploadDirectory == '' ? '/' : uploadDirectory + '/'
+	];
+	for (var directoryIndex = 0; directoryIndex < uploadDirectories.length; directoryIndex++) {
+		var option = document.createElement('option');
+		option.value = directoryIndex;
+		option.textContent = directoryLabels[directoryIndex];
+		uploadDirectorySelect.appendChild(option);
+	}
 	var uploadSelection = null;
 
 	var getEditorSelection = function() {
@@ -118,8 +140,10 @@ window.addEventListener('DOMContentLoaded',(function(e){
 	var uploadFile = function(file) {
 		if (!file || !file.name) return;
 		var selection = uploadSelection || getEditorSelection();
+		var directory = uploadDirectories[parseInt(uploadDirectorySelect.value, 10) || 0];
+		var relativeDirectory = directory == uploadDirectory ? '' : pageFile;
 		var xhr = new XMLHttpRequest();
-		xhr.open('PUT', fileApiUrl(uploadDirectory, file.name), true);
+		xhr.open('PUT', fileApiUrl(directory, file.name), true);
 		xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
 		status.textContent = 'Uploading ' + file.name + '...';
 		xhr.onload = function() {
@@ -128,7 +152,7 @@ window.addEventListener('DOMContentLoaded',(function(e){
 				json = JSON.parse(xhr.responseText);
 			} catch (error) {}
 			if (xhr.status >= 200 && xhr.status < 300) {
-				insertAtEditorSelection(markdownLinkForFile(file.name), selection);
+				insertAtEditorSelection(markdownLinkForFile(file.name, relativeDirectory), selection);
 				update();
 				status.textContent = 'Uploaded ' + file.name + '. Save to apply the link.';
 			} else {
@@ -155,23 +179,25 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		}
 		uploadInput.value = '';
 	});
-	dropZone.addEventListener('dragover', function(event) {
+	var hasFiles = function(event) {
+		return event.dataTransfer && event.dataTransfer.types &&
+			Array.prototype.indexOf.call(event.dataTransfer.types, 'Files') >= 0;
+	};
+	editorDropTarget.addEventListener('dragover', function(event) {
+		if (!hasFiles(event)) return;
 		event.preventDefault();
-		dropZone.classList.add('file-drop-active');
+		event.dataTransfer.dropEffect = 'copy';
+		document.getElementById('editor-pane').classList.add('file-drop-active');
 	});
-	dropZone.addEventListener('dragleave', function() {
-		dropZone.classList.remove('file-drop-active');
+	editorDropTarget.addEventListener('dragleave', function(event) {
+		if (event.relatedTarget && editorDropTarget.contains(event.relatedTarget)) return;
+		document.getElementById('editor-pane').classList.remove('file-drop-active');
 	});
-	dropZone.addEventListener('drop', function(event) {
+	editorDropTarget.addEventListener('drop', function(event) {
+		if (!hasFiles(event)) return;
 		event.preventDefault();
-		dropZone.classList.remove('file-drop-active');
+		document.getElementById('editor-pane').classList.remove('file-drop-active');
 		if (event.dataTransfer.files.length > 0) uploadFile(event.dataTransfer.files[0]);
-	});
-	dropZone.addEventListener('keydown', function(event) {
-		if (event.key == 'Enter' || event.key == ' ') {
-			event.preventDefault();
-			uploadButton.click();
-		}
 	});
 
 	var loadSection = function() {

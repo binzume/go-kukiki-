@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var sectionHeaderPattern = regexp.MustCompile(`^#\[([A-Za-z0-9_.-]+)(?:#([0-9]+))?\][ \t]*$`)
+var sectionHeaderPattern = regexp.MustCompile(`^&\[([A-Za-z0-9_.-]+)(?:#([0-9]+))?\][ \t]*$`)
 
 var (
 	ErrSectionNotFound = errors.New("section not found")
@@ -288,7 +288,7 @@ func rewriteSection(source io.Reader, destination io.Writer, name, body string, 
 
 func formatSectionHeader(name string, updateUnixMS int64) string {
 	if updateUnixMS == 0 {
-		return fmt.Sprintf("#[%s]\n", name)
+		return fmt.Sprintf("&[%s]\n", name)
 	}
-	return fmt.Sprintf("#[%s#%d]\n", name, updateUnixMS)
+	return fmt.Sprintf("&[%s#%d]\n", name, updateUnixMS)
 }

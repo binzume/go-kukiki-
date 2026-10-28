@@ -278,7 +278,7 @@ func TestFileAPI(t *testing.T) {
 
 func TestSectionAPI(t *testing.T) {
 	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("diary/2025-10.md", []byte("preamble\n#[today#1730000000000]\nold text\n\n#[other]\nkeep text\n")); err != nil {
+	if err := storage.Store("diary/2025-10.md", []byte("preamble\n&[today#1730000000000]\nold text\n\n&[other]\nkeep text\n")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{Default: DirConfig{Template: "template.html"}}
@@ -331,7 +331,7 @@ func TestSectionAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading updated page failed: %v", err)
 	}
-	want := "preamble\n#[today]\nnew text\n#[other]\nkeep text\n"
+	want := "preamble\n&[today]\nnew text\n&[other]\nkeep text\n"
 	if string(data) != want {
 		t.Errorf("updated page = %q, want %q", data, want)
 	}
@@ -355,7 +355,7 @@ func TestSectionAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading page after new section failed: %v", err)
 	}
-	want = "preamble\n#[today]\nnew text\n#[other]\nkeep text\n#[new_section]\nadded text\n"
+	want = "preamble\n&[today]\nnew text\n&[other]\nkeep text\n&[new_section]\nadded text\n"
 	if string(data) != want {
 		t.Errorf("page after new section = %q, want %q", data, want)
 	}
@@ -715,7 +715,7 @@ func TestLogoutLinkOnlyAppearsForAuthenticatedPages(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])})
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if !strings.Contains(response.Body.String(), `<a href="/logout">ログアウト</a>`) {
+	if !strings.Contains(response.Body.String(), `<nav class="page-links"`) || !strings.Contains(response.Body.String(), `<a href="/logout">ログアウト</a>`) || !strings.Contains(response.Body.String(), `>Edit</a>`) {
 		t.Errorf("authenticated page is missing the logout link: %s", response.Body.String())
 	}
 }
@@ -879,7 +879,7 @@ func TestBlockDirective(t *testing.T) {
 }
 
 func TestRenderMarkdownSectionsFromParserReader(t *testing.T) {
-	parser := NewParser(strings.NewReader("&title:Diary\n\n#[today]\n\nToday\n\n#[tomorrow#1730000000000]\nTomorrow"))
+	parser := NewParser(strings.NewReader("&title:Diary\n\n&[today]\n\n# Subheading\n\nToday\n\n&[tomorrow#1730000000000]\nTomorrow"))
 	headers := parser.ParseHeader()
 	if headers["title"] != "Diary" {
 		t.Fatalf("title = %q, want %q", headers["title"], "Diary")
@@ -894,6 +894,7 @@ func TestRenderMarkdownSectionsFromParserReader(t *testing.T) {
 	for _, want := range []string{
 		"<div class='section' id='today'>",
 		"<h1><a href='#today'>today</a></h1>",
+		"<h2>Subheading</h2>",
 		"<p>Today</p>",
 		"<div class='section' id='tomorrow'>",
 		"<h1><a href='#tomorrow'>tomorrow</a></h1>",
@@ -908,7 +909,7 @@ func TestRenderMarkdownSectionsFromParserReader(t *testing.T) {
 func TestRenderMarkdownDiarySectionIDs(t *testing.T) {
 	var output bytes.Buffer
 	if err := renderMarkdownReader(
-		strings.NewReader("#[2026-10-27]\n\nEntry"),
+		strings.NewReader("&[2026-10-27]\n\nEntry"),
 		&output,
 		nil,
 		true,

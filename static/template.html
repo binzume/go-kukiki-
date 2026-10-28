@@ -9,11 +9,11 @@
   <link rel="stylesheet" href="/css/style.css">
  </head>
  <body>
-{{if .loggedIn}}
-<nav class="account-nav" aria-label="Account"><a href="/logout">ログアウト</a></nav>
-{{end}}
-{{if .editURL}}
-<nav><a href="{{.editURL}}">Edit</a></nav>
+{{if or .loggedIn .editURL}}
+<nav class="page-links" aria-label="Page actions">
+{{if .loggedIn}}<a href="/logout">ログアウト</a>{{end}}
+{{if .editURL}}<a href="{{.editURL}}">Edit</a>{{end}}
+</nav>
 {{end}}
 {{if .breadcrumbs}}
 <nav class="breadcrumbs" aria-label="Breadcrumb">

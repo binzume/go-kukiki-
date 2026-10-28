@@ -22,7 +22,9 @@ Section: <input type="text" id="sectionpath" value="{{.section}}" />
 
 <button type="button" id="upload-button">Upload file</button>
 <input type="file" id="file-upload" hidden />
-<span id="file-drop-zone" role="button" tabindex="0">Drop a file here</span>
+<label for="file-upload-directory">Upload to:
+	<select id="file-upload-directory"></select>
+</label>
 
 <div id="content" style="height:calc(100vh - 80pt);">
 

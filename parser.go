@@ -28,18 +28,18 @@ func (r *Parser) ParseHeader() map[string]string {
 			a := strings.SplitN(text[1:], ":", 2)
 			if len(a) == 2 {
 				h[a[0]] = a[1]
+				continue
 			}
-		} else {
-			if _, ok := h["title"]; !ok && strings.HasPrefix(text, "# ") {
-				h["title"] = text[2:]
-			}
-			// Preserve the line separator when replaying the first non-header
-			// line. Without it, a block directive at the start of a document
-			// gets joined with the following line.
-			r.buf = append([]byte(nil), r.scanner.Bytes()...)
-			r.buf = append(r.buf, '\n')
-			break
 		}
+		if _, ok := h["title"]; !ok && strings.HasPrefix(text, "# ") {
+			h["title"] = text[2:]
+		}
+		// Preserve the line separator when replaying the first non-header
+		// line. Without it, a block directive at the start of a document
+		// gets joined with the following line.
+		r.buf = append([]byte(nil), r.scanner.Bytes()...)
+		r.buf = append(r.buf, '\n')
+		break
 	}
 	return h
 }

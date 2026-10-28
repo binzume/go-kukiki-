@@ -98,14 +98,20 @@ func sectionHTMLID(name string, diaryMode bool) string {
 }
 
 func startMarkdownSegment(out io.Writer, sectionName string, sectionEditURL func(string) string, diaryMode bool) *markdownSegment {
-	writer := &markdownLinkWriter{DocWriter: markdown.NewHTMLWriter(out)}
+	headingOffset := 0
+	if sectionName != "" {
+		headingOffset = 1
+	}
+	writer := &markdownLinkWriter{DocWriter: markdown.NewHTMLWriterWithHeadingOffset(out, headingOffset)}
 	section := 0
 	if sectionName != "" {
 		sectionID := sectionHTMLID(sectionName, diaryMode)
 		section = writer.Block(markdown.MarkupData{
 			Attributes: markdown.Attributes(".section #" + sectionID),
 		})
-		title := writer.Heading(1, markdown.MarkupData{})
+		// The section body writer offsets Markdown headings by one level. Use
+		// level 0 here so the section title remains the enclosing h1.
+		title := writer.Heading(0, markdown.MarkupData{})
 		fmt.Fprintf(out, "<a href='#%s'>", template.HTMLEscapeString(sectionID))
 		writer.Write(sectionName)
 		io.WriteString(out, "</a>")
@@ -841,7 +847,12 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 			if pageName == "" {
 				pageName = "/"
 			}
-			executeTemplate(w, templates, http.StatusOK, "editor.html", templateData(config, map[string]any{
+			editorTemplates, err := template.ParseFiles("static/editor.html")
+			if err != nil {
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			executeTemplate(w, editorTemplates, http.StatusOK, "editor.html", templateData(config, map[string]any{
 				"title":     "It works!",
 				"siteTitle": config.siteTitle(config.Default),
 				"page":      pageName,
