@@ -20,9 +20,6 @@
 {{range $index, $item := .breadcrumbs}}{{if $index}} / {{end}}<a href="{{$item.URL}}">{{$item.Title}}</a>{{end}} /
 </nav>
 {{end}}
-<aside class="side-menu">
-{{markdownFile "static/menu.md"}}
-</aside>
 <div id="content">
 {{.ctx | markdown}}
 </div>

@@ -26,6 +26,26 @@ header form {
 	display: inline-block;
 }
 
+#file-drop-zone {
+	display: inline-block;
+	margin-left: 6pt;
+	padding: 2pt 6pt;
+	border: 1px dashed #888888;
+	border-radius: 2pt;
+	color: #555555;
+	cursor: pointer;
+}
+
+#file-drop-zone.file-drop-active {
+	border-color: #4466ee;
+	background-color: #eef2ff;
+	color: #223399;
+}
+
+#file-drop-zone:focus {
+	outline: 1px solid #4466ee;
+}
+
 #side-pane {
 	width: 200pt;
 	float:left;

@@ -303,7 +303,8 @@ func printCalender(c *templateContext) template.HTML {
 		}
 		return ""
 	}
-	return template.HTML(cal.Html())
+	monthLabel := cal.Date.Format("2006-01")
+	return template.HTML(fmt.Sprintf("<h2 class='diary-calendar-month'>%s</h2>\n%s", monthLabel, cal.Html()))
 }
 
 func pageFile(page string) (string, error) {
@@ -642,6 +643,76 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "It works!"})
+	})
+
+	mux.HandleFunc("PUT /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		if !isLoggedIn(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"_status": 401, "message": "authentication required"})
+			return
+		}
+
+		name, err := normalizeFSPath(r.PathValue("path"))
+		if err != nil || isBlockedPage(name) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad file path"})
+			return
+		}
+		if r.ContentLength > maxUploadSize {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"_status": 413, "message": "uploaded file is too large"})
+			return
+		}
+
+		size, created, err := writeUploadedFile(storage, name, r.Body)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrWritableFS):
+				writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "file uploads are not supported"})
+			case errors.Is(err, ErrUploadTooLarge):
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"_status": 413, "message": "uploaded file is too large"})
+			case errors.Is(err, ErrNotRegularFile):
+				writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "target is not a regular file"})
+			default:
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to store file"})
+			}
+			return
+		}
+
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		writeJSON(w, status, map[string]any{
+			"_status": status,
+			"path":    name,
+			"size":    size,
+			"url":     "/" + name,
+		})
+	})
+
+	mux.HandleFunc("DELETE /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		if !isLoggedIn(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"_status": 401, "message": "authentication required"})
+			return
+		}
+
+		name, err := normalizeFSPath(r.PathValue("path"))
+		if err != nil || isBlockedPage(name) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad file path"})
+			return
+		}
+		if err := removeStoredFile(storage, name); err != nil {
+			switch {
+			case errors.Is(err, ErrWritableFS):
+				writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "file deletion is not supported"})
+			case os.IsNotExist(err):
+				writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "file not found"})
+			case errors.Is(err, ErrNotRegularFile):
+				writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "target is not a regular file"})
+			default:
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to delete file"})
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	mux.HandleFunc("GET /api/pages/{page...}", func(w http.ResponseWriter, r *http.Request) {

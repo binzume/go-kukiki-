@@ -197,6 +197,85 @@ func TestPageAPI(t *testing.T) {
 	}
 }
 
+func TestFileAPI(t *testing.T) {
+	storage := NewLoacalStorage(t.TempDir())
+	config := &Config{Default: DirConfig{Template: "template.html"}}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	request, err := http.NewRequest(http.MethodPut, ts.URL+"/api/files/docs/image.bin", bytes.NewReader([]byte("image data")))
+	if err != nil {
+		t.Fatalf("creating unauthenticated upload request failed: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("unauthenticated upload failed: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated upload status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+
+	cookie := enableTestAuth(t)
+	do := func(method, path string, body io.Reader) *http.Response {
+		request, err := http.NewRequest(method, ts.URL+path, body)
+		if err != nil {
+			t.Fatalf("creating %s request failed: %v", method, err)
+		}
+		request.AddCookie(cookie)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("%s %s failed: %v", method, path, err)
+		}
+		return response
+	}
+
+	response = do(http.MethodPut, "/api/files/docs/image.bin", bytes.NewReader([]byte("image data")))
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("new upload status = %d, want %d", response.StatusCode, http.StatusCreated)
+	}
+	response.Body.Close()
+	if data, err := storage.Get("docs/image.bin"); err != nil || string(data) != "image data" {
+		t.Fatalf("uploaded file = %q, err = %v", data, err)
+	}
+
+	response = do(http.MethodPut, "/api/files/docs/image.bin", bytes.NewReader([]byte("updated")))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("replacement upload status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	response.Body.Close()
+	if data, err := storage.Get("docs/image.bin"); err != nil || string(data) != "updated" {
+		t.Fatalf("replaced file = %q, err = %v", data, err)
+	}
+
+	response = do(http.MethodPut, "/api/files/docs/guide.md", bytes.NewReader([]byte("# Guide")))
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("markdown upload status = %d, want %d", response.StatusCode, http.StatusCreated)
+	}
+	response.Body.Close()
+
+	response = do(http.MethodDelete, "/api/files/docs/guide.md", nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("markdown deletion status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+	response.Body.Close()
+	if storage.Exists("docs/guide.md") {
+		t.Fatal("markdown file still exists after deletion")
+	}
+
+	response = do(http.MethodDelete, "/api/files/docs/image.bin", nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("file deletion status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+	response.Body.Close()
+
+	response = do(http.MethodDelete, "/api/files/docs/missing.bin", nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Errorf("missing file deletion status = %d, want %d", response.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestSectionAPI(t *testing.T) {
 	storage := NewLoacalStorage(t.TempDir())
 	if err := storage.Store("diary/2025-10.md", []byte("preamble\n#[today#1730000000000]\nold text\n\n#[other]\nkeep text\n")); err != nil {
@@ -845,6 +924,20 @@ func TestRenderMarkdownDiarySectionIDs(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("diary section rendering is missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestPrintCalenderIncludesMonthLabel(t *testing.T) {
+	got := string(printCalender(&templateContext{
+		Diary:    true,
+		PagePath: "diary/2026-10",
+	}))
+
+	if !strings.Contains(got, "<h2 class='diary-calendar-month'>2026-10</h2>") {
+		t.Errorf("calendar month label is missing: %s", got)
+	}
+	if strings.Index(got, "<h2 class='diary-calendar-month'>") > strings.Index(got, "<table class='calendar'>") {
+		t.Errorf("calendar month label is not above the calendar: %s", got)
 	}
 }
 
