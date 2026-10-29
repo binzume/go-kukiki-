@@ -1,23 +1,26 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/binzume/go-markdown"
 )
 
 func TestServer(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 
 	ts := httptest.NewServer(initHttpd(storage, config))
@@ -37,8 +40,8 @@ func TestServer(t *testing.T) {
 }
 
 func TestDataFileIsServed(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("asset.txt", []byte("raw asset")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "asset.txt", []byte("raw asset")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{Default: DirConfig{Template: "template.html"}}
@@ -63,7 +66,7 @@ func TestDataFileIsServed(t *testing.T) {
 }
 
 func TestMissingPageReturnsNotFound(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	ts := httptest.NewServer(initHttpd(storage, config))
 	defer ts.Close()
@@ -101,7 +104,7 @@ func enableTestAuth(t *testing.T) *http.Cookie {
 }
 
 func TestPageAPI(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	ts := httptest.NewServer(initHttpd(storage, config))
 	defer ts.Close()
@@ -124,7 +127,7 @@ func TestPageAPI(t *testing.T) {
 	if rootRes.StatusCode != http.StatusOK {
 		t.Fatalf("root post status = %d, want %d", rootRes.StatusCode, http.StatusOK)
 	}
-	if data, err := storage.Get("/index.md"); err != nil || string(data) != "# Root" {
+	if data, err := readStorageFile(storage, "/index.md"); err != nil || string(data) != "# Root" {
 		t.Fatalf("stored root page = %q, err = %v", data, err)
 	}
 
@@ -143,7 +146,7 @@ func TestPageAPI(t *testing.T) {
 	}
 	res.Body.Close()
 
-	if data, err := storage.Get("/docs/guide.md"); err != nil || string(data) != "# Guide" {
+	if data, err := readStorageFile(storage, "/docs/guide.md"); err != nil || string(data) != "# Guide" {
 		t.Fatalf("stored page = %q, err = %v", data, err)
 	}
 
@@ -184,7 +187,7 @@ func TestPageAPI(t *testing.T) {
 		t.Errorf("missing page status = %d, want %d", res.StatusCode, http.StatusNotFound)
 	}
 
-	failing := &failingStorage{Storage: storage}
+	failing := &failingStorage{FS: storage}
 	failingServer := httptest.NewServer(initHttpd(failing, config))
 	defer failingServer.Close()
 	res, err = do(http.MethodPost, failingServer.URL+"/api/pages/docs/fail", strings.NewReader(`{"text":"fail"}`))
@@ -198,7 +201,7 @@ func TestPageAPI(t *testing.T) {
 }
 
 func TestFileAPI(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	ts := httptest.NewServer(initHttpd(storage, config))
 	defer ts.Close()
@@ -235,7 +238,7 @@ func TestFileAPI(t *testing.T) {
 		t.Fatalf("new upload status = %d, want %d", response.StatusCode, http.StatusCreated)
 	}
 	response.Body.Close()
-	if data, err := storage.Get("docs/image.bin"); err != nil || string(data) != "image data" {
+	if data, err := readStorageFile(storage, "docs/image.bin"); err != nil || string(data) != "image data" {
 		t.Fatalf("uploaded file = %q, err = %v", data, err)
 	}
 
@@ -244,7 +247,7 @@ func TestFileAPI(t *testing.T) {
 		t.Fatalf("replacement upload status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
 	response.Body.Close()
-	if data, err := storage.Get("docs/image.bin"); err != nil || string(data) != "updated" {
+	if data, err := readStorageFile(storage, "docs/image.bin"); err != nil || string(data) != "updated" {
 		t.Fatalf("replaced file = %q, err = %v", data, err)
 	}
 
@@ -259,7 +262,7 @@ func TestFileAPI(t *testing.T) {
 		t.Fatalf("markdown deletion status = %d, want %d", response.StatusCode, http.StatusNoContent)
 	}
 	response.Body.Close()
-	if storage.Exists("docs/guide.md") {
+	if existsFile(storage, "docs/guide.md") {
 		t.Fatal("markdown file still exists after deletion")
 	}
 
@@ -277,8 +280,8 @@ func TestFileAPI(t *testing.T) {
 }
 
 func TestSectionAPI(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("diary/2025-10.md", []byte("preamble\n&[today#1730000000000]\nold text\n\n&[other]\nkeep text\n")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "diary/2025-10.md", []byte("preamble\n&[today#1730000000000]\nold text\n\n&[other]\nkeep text\n")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{Default: DirConfig{Template: "template.html"}}
@@ -327,7 +330,7 @@ func TestSectionAPI(t *testing.T) {
 		t.Fatalf("section save status = %d, want %d", res.StatusCode, http.StatusOK)
 	}
 
-	data, err := storage.Get("diary/2025-10.md")
+	data, err := readStorageFile(storage, "diary/2025-10.md")
 	if err != nil {
 		t.Fatalf("reading updated page failed: %v", err)
 	}
@@ -351,7 +354,7 @@ func TestSectionAPI(t *testing.T) {
 		t.Fatalf("new section save status = %d, want %d", res.StatusCode, http.StatusOK)
 	}
 
-	data, err = storage.Get("diary/2025-10.md")
+	data, err = readStorageFile(storage, "diary/2025-10.md")
 	if err != nil {
 		t.Fatalf("reading page after new section failed: %v", err)
 	}
@@ -359,10 +362,115 @@ func TestSectionAPI(t *testing.T) {
 	if string(data) != want {
 		t.Errorf("page after new section = %q, want %q", data, want)
 	}
+
+	request, err = http.NewRequest(http.MethodPost, ts.URL+"/api/pages/diary/2025-10?section=today", strings.NewReader(`{"text":""}`))
+	if err != nil {
+		t.Fatalf("empty section request creation failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])})
+	res, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("empty section save failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("empty section save status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	data, err = readStorageFile(storage, "diary/2025-10.md")
+	if err != nil {
+		t.Fatalf("reading page after empty section save failed: %v", err)
+	}
+	want = "preamble\n&[other]\nkeep text\n&[new_section]\nadded text\n"
+	if string(data) != want {
+		t.Errorf("page after empty section save = %q, want %q", data, want)
+	}
+}
+
+func TestEmptyPageAPIDeletesPage(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "docs/guide.md", []byte("# Guide")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	config := &Config{Default: DirConfig{Template: "template.html"}}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+	cookie := enableTestAuth(t)
+	request, err := http.NewRequest(http.MethodPost, ts.URL+"/api/pages/docs/guide", strings.NewReader(`{"text":""}`))
+	if err != nil {
+		t.Fatalf("empty page request creation failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	res, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("empty page save failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("empty page save status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if _, err := readStorageFile(storage, "docs/guide.md"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("empty page still exists, read error = %v", err)
+	}
+}
+
+func TestDeletingLastSectionDeletesPage(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "diary/2025-10.md", []byte("&[today]\nentry\n")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	if err := updateSection(storage, "diary/2025-10.md", "today", "", 0, true); err != nil {
+		t.Fatalf("updateSection returned an error: %v", err)
+	}
+	if _, err := readStorageFile(storage, "diary/2025-10.md"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("page after deleting its last section still exists, read error = %v", err)
+	}
+}
+
+func TestDiarySectionAPIPrependsNewSection(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "diary/2025-10.md", []byte("&[existing]\nexisting text\n")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	config := &Config{
+		Default:   DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{Prefix: "/diary/", Template: "template.html", Diary: true}},
+	}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+	cookie := enableTestAuth(t)
+	request, err := http.NewRequest(
+		http.MethodPost,
+		ts.URL+"/api/pages/diary/2025-10?section=2025-10-30",
+		strings.NewReader(`{"text":"new text","updateUnixMS":0}`),
+	)
+	if err != nil {
+		t.Fatalf("section save request creation failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	res, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("section save failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("section save status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+
+	data, err := readStorageFile(storage, "diary/2025-10.md")
+	if err != nil {
+		t.Fatalf("reading updated page failed: %v", err)
+	}
+	want := "&[2025-10-30]\nnew text\n&[existing]\nexisting text\n"
+	if string(data) != want {
+		t.Errorf("updated page = %q, want %q", data, want)
+	}
 }
 
 func TestEditDirectoryRedirect(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
 	r := initHttpd(storage, config)
 	cookie := enableTestAuth(t)
@@ -380,9 +488,27 @@ func TestEditDirectoryRedirect(t *testing.T) {
 	}
 }
 
+func TestDiaryTodayEditURL(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/diary/2025-10?from=test", nil)
+	request.URL.Fragment = "entry"
+	got, err := url.Parse(diaryTodayEditURL(request))
+	if err != nil {
+		t.Fatalf("diaryTodayEditURL returned an invalid URL: %v", err)
+	}
+	if got.Path != "/diary/" {
+		t.Errorf("diaryTodayEditURL path = %q, want %q", got.Path, "/diary/")
+	}
+	if got.Query().Get("edit") != "" || got.Query().Get("section") != time.Now().Format("2006-01-02") {
+		t.Errorf("diaryTodayEditURL query = %q", got.RawQuery)
+	}
+	if got.Query().Get("from") != "test" || got.Fragment != "" {
+		t.Errorf("diaryTodayEditURL retained unexpected URL parts: %q", got.String())
+	}
+}
+
 func TestExistingPageHasEditLink(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("docs/guide.md", []byte("# Guide")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "docs/guide.md", []byte("# Guide")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{Default: DirConfig{Template: "template.html"}}
@@ -416,8 +542,8 @@ func TestExistingPageHasEditLink(t *testing.T) {
 }
 
 func TestSiteTitleIsAppendedToPageTitle(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("docs/guide.md", []byte("# Guide")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "docs/guide.md", []byte("# Guide")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{Default: DirConfig{Template: "template.html"}, Title: "Kukiki Site"}
@@ -443,7 +569,7 @@ func TestSiteTitleIsAppendedToPageTitle(t *testing.T) {
 
 func TestLoadConfigSiteTitle(t *testing.T) {
 	configPath := t.TempDir() + "/kukiki.toml"
-	if err := os.WriteFile(configPath, []byte("[kukiki]\ntitle = \"Configured title\"\n"), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte("title = \"Configured title\"\n"), 0644); err != nil {
 		t.Fatalf("os.WriteFile returned an error: %v", err)
 	}
 
@@ -453,6 +579,41 @@ func TestLoadConfigSiteTitle(t *testing.T) {
 	}
 	if got := config.siteTitle(config.Default); got != "Configured title" {
 		t.Errorf("site title = %q, want %q", got, "Configured title")
+	}
+}
+
+func TestConfigTemplateDir(t *testing.T) {
+	config := &Config{}
+	if got := config.templateDir(); got != "static" {
+		t.Errorf("default template directory = %q, want %q", got, "static")
+	}
+
+	config.TemplateDir = "templates"
+	if got := config.templatePath("editor.html"); got != filepath.Join("templates", "editor.html") {
+		t.Errorf("custom template path = %q, want %q", got, filepath.Join("templates", "editor.html"))
+	}
+}
+
+func TestNotFoundTemplatePath(t *testing.T) {
+	templateDir := t.TempDir()
+	config := &Config{TemplateDir: templateDir}
+	if err := os.WriteFile(filepath.Join(templateDir, "404.md"), []byte("not found"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := notFoundTemplatePath(config, "/docs/missing.md"); got != filepath.Join(templateDir, "404.md") {
+		t.Errorf("non-root 404 template = %q, want 404.md", got)
+	}
+	if got := notFoundTemplatePath(config, "/index.md"); got != filepath.Join(templateDir, "404.md") {
+		t.Errorf("fallback 404 template = %q, want 404.md", got)
+	}
+
+	topPath := filepath.Join(templateDir, "404_top.md")
+	if err := os.WriteFile(topPath, []byte("top not found"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := notFoundTemplatePath(config, "/index.md"); got != topPath {
+		t.Errorf("root 404 template = %q, want %q", got, topPath)
 	}
 }
 
@@ -484,8 +645,8 @@ func TestTemplateVariables(t *testing.T) {
 }
 
 func TestTemplateVariablesAreRendered(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("index.md", []byte("# Home")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "index.md", []byte("# Home")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{
@@ -506,7 +667,7 @@ func TestTemplateVariablesAreRendered(t *testing.T) {
 }
 
 func TestPageBreadcrumbs(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	pages := map[string]string{
 		"index.md":                "# Home page",
 		"software/index.md":       "# Software",
@@ -514,8 +675,8 @@ func TestPageBreadcrumbs(t *testing.T) {
 		"software/cppfl/hoge.md":  "# Hoge page",
 	}
 	for path, content := range pages {
-		if err := storage.Store(path, []byte(content)); err != nil {
-			t.Fatalf("storage.Store(%q) returned an error: %v", path, err)
+		if err := writePage(storage, path, []byte(content)); err != nil {
+			t.Fatalf("writePage(storage, %q) returned an error: %v", path, err)
 		}
 	}
 
@@ -575,8 +736,8 @@ func TestPageBreadcrumbs(t *testing.T) {
 }
 
 func TestPageBreadcrumbsFallBackToDirectoryNames(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("software/index.md", []byte("content without a title")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "software/index.md", []byte("content without a title")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 
@@ -599,8 +760,8 @@ func TestEditingRequiresLogin(t *testing.T) {
 	}
 	defer func() { auth = previousAuth }()
 
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("docs/guide.md", []byte("# Guide")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "docs/guide.md", []byte("# Guide")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	config := &Config{Default: DirConfig{Template: "template.html"}}
@@ -661,8 +822,37 @@ func TestEditingRequiresLogin(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("authenticated save status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if data, err := storage.Get("docs/guide.md"); err != nil || string(data) != "changed" {
+	if data, err := readStorageFile(storage, "docs/guide.md"); err != nil || string(data) != "changed" {
 		t.Fatalf("saved page = %q, err = %v", data, err)
+	}
+}
+
+func TestEditorSectionInputOnlyAppearsWhenRequested(t *testing.T) {
+	previousAuth := auth
+	auth = &AuthConfig{
+		SessionSecret: "test-session-secret",
+		Accounts:      []AccountConfig{{Name: "admin", AuthType: "INSECURE", Secret: "password"}},
+	}
+	defer func() { auth = previousAuth }()
+
+	storage := NewLocalStorage(t.TempDir())
+	r := initHttpd(storage, &Config{Default: DirConfig{Template: "template.html"}})
+	cookie := &http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])}
+
+	request := httptest.NewRequest(http.MethodGet, "/docs/guide?edit", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if strings.Contains(response.Body.String(), `id="sectionpath"`) {
+		t.Errorf("editor without a section contains the section input: %s", response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/docs/guide?edit&section=today", nil)
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), `id="sectionpath"`) || !strings.Contains(response.Body.String(), `value="today"`) {
+		t.Errorf("editor with a section is missing the section input: %s", response.Body.String())
 	}
 }
 
@@ -673,7 +863,7 @@ func TestLogoutClearsSessionAndRedirects(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/logout", nil)
 	response := httptest.NewRecorder()
-	initHttpd(NewLoacalStorage(t.TempDir()), &Config{Default: DirConfig{Template: "template.html"}}).ServeHTTP(response, request)
+	initHttpd(NewLocalStorage(t.TempDir()), &Config{Default: DirConfig{Template: "template.html"}}).ServeHTTP(response, request)
 
 	if response.Code != http.StatusFound {
 		t.Fatalf("logout status = %d, want %d", response.Code, http.StatusFound)
@@ -698,8 +888,8 @@ func TestLogoutLinkOnlyAppearsForAuthenticatedPages(t *testing.T) {
 	}
 	defer func() { auth = previousAuth }()
 
-	storage := NewLoacalStorage(t.TempDir())
-	if err := storage.Store("index.md", []byte("# Home")); err != nil {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "index.md", []byte("# Home")); err != nil {
 		t.Fatalf("storage.Store returned an error: %v", err)
 	}
 	r := initHttpd(storage, &Config{Default: DirConfig{Template: "template.html"}})
@@ -721,11 +911,7 @@ func TestLogoutLinkOnlyAppearsForAuthenticatedPages(t *testing.T) {
 }
 
 type failingStorage struct {
-	Storage
-}
-
-func (s *failingStorage) Store(path string, data []byte) error {
-	return errors.New("store failed")
+	fs.FS
 }
 
 func TestPageFile(t *testing.T) {
@@ -755,7 +941,7 @@ func TestPageFile(t *testing.T) {
 }
 
 func TestLatestDiaryFile(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	for path, content := range map[string]string{
 		"diary/2024-12.md":        "# December",
 		"diary/2025-02.md":        "# February",
@@ -763,8 +949,8 @@ func TestLatestDiaryFile(t *testing.T) {
 		"diary/2025-02.txt":       "not a diary",
 		"diary/nested/2026-01.md": "not directly below diary",
 	} {
-		if err := storage.Store(path, []byte(content)); err != nil {
-			t.Fatalf("storage.Store(%q) returned an error: %v", path, err)
+		if err := writePage(storage, path, []byte(content)); err != nil {
+			t.Fatalf("writePage(storage, %q) returned an error: %v", path, err)
 		}
 	}
 
@@ -777,15 +963,15 @@ func TestLatestDiaryFile(t *testing.T) {
 }
 
 func TestDiaryDirectoryDisplaysLatestDiary(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	for path, content := range map[string]string{
 		"diary/index.md":   "# Index must not be displayed",
 		"diary/2024-12.md": "# Older diary",
 		"diary/2025-02.md": "# Latest diary",
 		"notes/index.md":   "# Notes",
 	} {
-		if err := storage.Store(path, []byte(content)); err != nil {
-			t.Fatalf("storage.Store(%q) returned an error: %v", path, err)
+		if err := writePage(storage, path, []byte(content)); err != nil {
+			t.Fatalf("writePage(storage, %q) returned an error: %v", path, err)
 		}
 	}
 	config := &Config{
@@ -816,19 +1002,19 @@ func TestDiaryDirectoryDisplaysLatestDiary(t *testing.T) {
 }
 
 func TestLocalStorageRejectsInvalidPaths(t *testing.T) {
-	storage := NewLoacalStorage(t.TempDir())
+	storage := NewLocalStorage(t.TempDir())
 	for _, path := range []string{"../secret", "/docs/../secret", `..\secret`, "/", "docs//page"} {
-		if err := storage.Store(path, []byte("should not be written")); err == nil {
-			t.Errorf("Store(%q) unexpectedly succeeded", path)
+		if err := writePage(storage, path, []byte("should not be written")); err == nil {
+			t.Errorf("writePage(%q) unexpectedly succeeded", path)
 		}
-		if _, err := storage.Get(path); err == nil {
-			t.Errorf("Get(%q) unexpectedly succeeded", path)
+		if _, err := readStorageFile(storage, path); err == nil {
+			t.Errorf("Open(%q) unexpectedly succeeded", path)
 		}
-		if storage.Exists(path) {
+		if existsFile(storage, path) {
 			t.Errorf("Exists(%q) unexpectedly returned true", path)
 		}
-		if _, ok := storage.FilePath(path); ok {
-			t.Errorf("FilePath(%q) unexpectedly succeeded", path)
+		if _, ok := dataFileName(storage, path); ok {
+			t.Errorf("dataFileName(%q) unexpectedly succeeded", path)
 		}
 	}
 }
@@ -836,9 +1022,9 @@ func TestLocalStorageRejectsInvalidPaths(t *testing.T) {
 func TestMarkdownLinkWriter(t *testing.T) {
 	var output bytes.Buffer
 	writer := &markdownLinkWriter{DocWriter: markdown.NewHTMLWriter(&output)}
-	err := markdown.Convert(bufio.NewScanner(strings.NewReader(
+	err := markdown.Convert(strings.NewReader(
 		"[local](page.md) [root](/index.md) [nested](/docs/index.md) [external](https://example.com/page.md) [query](page.md?x=1)",
-	)), writer)
+	), writer)
 	writer.Close()
 	if err != nil {
 		t.Fatalf("markdown.Convert returned an error: %v", err)
@@ -865,7 +1051,7 @@ func TestMarkdownLinkWriter(t *testing.T) {
 func TestBlockDirective(t *testing.T) {
 	var output bytes.Buffer
 	err := convertMarkdown(
-		bufio.NewScanner(strings.NewReader("::: block className\n**hello**\n:::")),
+		strings.NewReader("::: block className\n**hello**\n:::"),
 		markdown.NewHTMLWriter(&output),
 	)
 	if err != nil {
@@ -929,7 +1115,7 @@ func TestRenderMarkdownDiarySectionIDs(t *testing.T) {
 }
 
 func TestPrintCalenderIncludesMonthLabel(t *testing.T) {
-	got := string(printCalender(&templateContext{
+	got := string(printCalendar(&templateContext{
 		Diary:    true,
 		PagePath: "diary/2026-10",
 	}))
@@ -946,7 +1132,7 @@ func TestIDDirective(t *testing.T) {
 	var output bytes.Buffer
 	writer := markdown.NewHTMLWriter(&output)
 	err := convertMarkdown(
-		bufio.NewScanner(strings.NewReader(":id[hoge]{#foo}")),
+		strings.NewReader(":id[hoge]{#foo}"),
 		writer,
 	)
 	writer.Close()

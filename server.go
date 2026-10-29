@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,7 +55,7 @@ func (w *markdownLinkWriter) Link(url string, title string, data markdown.Markup
 	return w.DocWriter.Link(url, title, data)
 }
 
-func convertMarkdown(scanner *bufio.Scanner, writer markdown.DocWriter) error {
+func convertMarkdown(reader io.Reader, writer markdown.DocWriter) error {
 	md := markdown.NewMarkdown()
 	md.RegisterDirective("id", func(d *markdown.DirectiveContext) error {
 		if !strings.HasPrefix(d.Argument, "#") || len(d.Argument) == 1 {
@@ -70,15 +72,16 @@ func convertMarkdown(scanner *bufio.Scanner, writer markdown.DocWriter) error {
 		n := d.Writer.Block(markdown.MarkupData{
 			Attributes: markdown.Attributes("." + d.Argument),
 		})
-		err := md.Convert(bufio.NewScanner(d.Content), d.Writer)
+		err := md.Convert(d.Content, d.Writer)
 		d.Writer.End(n)
 		return err
 	})
-	return md.Convert(scanner, writer)
+
+	return md.Convert(reader, writer)
 }
 
 func convertMarkdownReader(reader io.Reader, writer markdown.DocWriter) error {
-	return convertMarkdown(bufio.NewScanner(reader), writer)
+	return convertMarkdown(reader, writer)
 }
 
 type markdownSegment struct {
@@ -86,6 +89,10 @@ type markdownSegment struct {
 	writer  *markdownLinkWriter
 	section int
 	done    chan error
+}
+
+func isCodeFenceLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "```")
 }
 
 var diarySectionIDPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-`)
@@ -172,7 +179,7 @@ func renderMarkdownReader(reader io.Reader, out io.Writer, sectionEditURL func(s
 			_ = segment.close()
 			return err
 		}
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+		if isCodeFenceLine(line) {
 			inCodeFence = !inCodeFence
 		}
 	}
@@ -195,23 +202,20 @@ func renderMarkdownFile(path string, out io.Writer) error {
 	return renderMarkdownReader(fp, out, nil, false)
 }
 
-func dataFilePath(storage Storage, requestPath string) (string, bool) {
+func dataFileName(storage fs.FS, requestPath string) (string, bool) {
 	path := strings.TrimPrefix(requestPath, "/")
 	if path == "" || strings.HasSuffix(requestPath, "/") || strings.HasPrefix(path, "/") {
 		return "", false
 	}
-	if validatePath(path) != nil || !storage.Exists(path) {
+	name, err := normalizeFSPath(path)
+	if err != nil {
 		return "", false
 	}
-	file, ok := storage.FilePath(path)
-	if !ok {
-		return "", false
-	}
-	info, err := os.Stat(file)
+	info, err := fs.Stat(storage, name)
 	if err != nil || !info.Mode().IsRegular() {
 		return "", false
 	}
-	return file, true
+	return name, true
 }
 
 func parseIntDefault(str string, defvalue int) int {
@@ -223,12 +227,12 @@ func parseIntDefault(str string, defvalue int) int {
 }
 
 type templateContext struct {
-	Request   *http.Request
-	Storage   Storage
-	Input     io.Reader
-	InputPath string
-	PagePath  string
-	Diary     bool
+	Request    *http.Request
+	FileSystem fs.FS
+	Input      io.Reader
+	InputPath  string
+	PagePath   string
+	Diary      bool
 }
 
 func markdownRenderer(c *templateContext) (template.HTML, error) {
@@ -280,12 +284,12 @@ func markdownFile(path string) (template.HTML, error) {
 	return template.HTML(out.String()), nil
 }
 
-func printCalender(c *templateContext) template.HTML {
-	var storage Storage
+func printCalendar(c *templateContext) template.HTML {
+	var storage fs.FS
 	diaryMode := false
 	pagePath := ""
 	if c != nil {
-		storage = c.Storage
+		storage = c.FileSystem
 		diaryMode = c.Diary
 		pagePath = c.PagePath
 	}
@@ -304,7 +308,7 @@ func printCalender(c *templateContext) template.HTML {
 		if diaryMode && pagePath != "" {
 			return "/" + pagePath + "#" + sectionHTMLID(path, true)
 		}
-		if storage == nil || storage.Exists(path+".md") {
+		if storage == nil || existsFile(storage, path+".md") {
 			return path
 		}
 		return ""
@@ -329,12 +333,23 @@ var diaryFilePattern = regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])\.md$`)
 // latestDiaryFile returns the newest monthly diary directly under directory.
 // The yyyy-mm filename format makes a lexical comparison equivalent to a
 // chronological comparison.
-func latestDiaryFile(storage Storage, directory string) string {
+func latestDiaryFile(storage fs.FS, directory string) string {
 	directory = strings.Trim(directory, "/")
+	readDirPath := directory
+	if readDirPath == "" {
+		readDirPath = "."
+	}
+	entries, err := fs.ReadDir(storage, readDirPath)
+	if err != nil {
+		return ""
+	}
+
 	latest := ""
-	for _, entry := range storage.List(directory) {
-		name := strings.TrimLeft(entry, "/")
-		name = strings.TrimPrefix(name, directory+"/")
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		name := entry.Name()
 		if !diaryFilePattern.MatchString(name) || name <= latest {
 			continue
 		}
@@ -368,7 +383,7 @@ func directoryConfig(config *Config, page string) DirConfig {
 
 // resolvePageFile maps a request to the file that should be displayed. A
 // diary directory uses its newest monthly diary instead of index.md.
-func resolvePageFile(storage Storage, requestPath string, config *Config) (string, DirConfig, error) {
+func resolvePageFile(storage fs.FS, requestPath string, config *Config) (string, DirConfig, error) {
 	page, err := pageFile(requestPath)
 	if err != nil {
 		return "", DirConfig{}, err
@@ -386,19 +401,19 @@ type Breadcrumb struct {
 	URL   string
 }
 
-func storagePageTitle(storage Storage, page string) string {
-	data, err := storage.Get(page)
+func storagePageTitle(storage fs.FS, page string) string {
+	data, err := readStorageFile(storage, page)
 	if err != nil {
 		return ""
 	}
 	return NewParser(bytes.NewReader(data)).ParseHeader()["title"]
 }
 
-func buildBreadcrumbs(storage Storage, pagePath, siteTitle string) []Breadcrumb {
+func buildBreadcrumbs(storage fs.FS, pagePath, siteTitle string) []Breadcrumb {
 	return buildBreadcrumbsWithConfig(storage, pagePath, siteTitle, nil)
 }
 
-func buildBreadcrumbsWithConfig(storage Storage, pagePath, siteTitle string, config *Config) []Breadcrumb {
+func buildBreadcrumbsWithConfig(storage fs.FS, pagePath, siteTitle string, config *Config) []Breadcrumb {
 	cleanPath := strings.Trim(pagePath, "/")
 	if cleanPath == "" {
 		return nil
@@ -434,6 +449,24 @@ func editPageURL(r *http.Request) string {
 	u := *r.URL
 	query := u.Query()
 	query.Set("edit", "")
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func diaryTodayEditURL(r *http.Request) string {
+	u := *r.URL
+	directory := strings.TrimRight(u.Path, "/")
+	if separator := strings.LastIndexByte(directory, '/'); separator >= 0 {
+		directory = directory[:separator+1]
+	} else {
+		directory = "/"
+	}
+	u.Path = directory
+	u.RawPath = ""
+	u.Fragment = ""
+	query := u.Query()
+	query.Set("edit", "")
+	query.Set("section", time.Now().Format("2006-01-02"))
 	u.RawQuery = query.Encode()
 	return u.String()
 }
@@ -501,7 +534,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	c := &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    auth.CreateSessionString(a),
-		MaxAge:   int(time.Hour.Seconds()) * 24 * 365,
+		MaxAge:   int(auth.sessionTTLSeconds()),
 		Secure:   r.TLS != nil,
 		HttpOnly: true,
 		Path:     "/",
@@ -603,6 +636,16 @@ func executeTemplate(w http.ResponseWriter, templates *template.Template, status
 	_, _ = w.Write(output.Bytes())
 }
 
+func notFoundTemplatePath(config *Config, page string) string {
+	if page == "/index.md" {
+		topPath := config.templatePath("404_top.md")
+		if info, err := os.Stat(topPath); err == nil && info.Mode().IsRegular() {
+			return topPath
+		}
+	}
+	return config.templatePath("404.md")
+}
+
 // templateData adds site-wide variables to the data passed to a template.
 // Variables are available both under .variables and by their name (for
 // example, .variables.author and .author). Explicit template data wins over
@@ -622,20 +665,20 @@ func templateData(config *Config, data map[string]any) map[string]any {
 	return result
 }
 
-func initHttpd(storage Storage, config *Config) http.Handler {
+func initHttpd(storage fs.FS, config *Config) http.Handler {
 	templates, err := template.New("root").Funcs(template.FuncMap{
 		"markdown":     markdownRenderer,
 		"markdownFile": markdownFile,
-		"calender":     printCalender,
-	}).ParseGlob("static/*.html")
+		"calender":     printCalendar,
+	}).ParseGlob(filepath.Join(config.templateDir(), "*.html"))
 	if err != nil {
 		panic(err)
 	}
 
 	mux := http.NewServeMux()
 
-	mux.Handle("/css/", http.StripPrefix("/css/", http.FileServer(http.Dir("./static/css"))))
-	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServer(http.Dir("./static/js"))))
+	mux.Handle("/css/", http.StripPrefix("/css/", http.FileServerFS(os.DirFS("static/css"))))
+	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServerFS(os.DirFS("static/js"))))
 
 	mux.HandleFunc("GET /login.html", func(w http.ResponseWriter, r *http.Request) {
 		executeTemplate(w, templates, http.StatusOK, "login.html", templateData(config, map[string]any{
@@ -748,7 +791,7 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 			})
 			return
 		}
-		if data, err := storage.Get(page); err == nil {
+		if data, err := readStorageFile(storage, page); err == nil {
 			writeText(w, http.StatusOK, data)
 		} else if os.IsNotExist(err) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "page not found"})
@@ -787,7 +830,9 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 			return
 		}
 		if sectionValues, ok := r.URL.Query()["section"]; ok {
-			if err := updateSection(storage, page, firstQueryValue(sectionValues), *parsed.Text, parsed.UpdateUnixMS); err != nil {
+			pageConfigPath := "/" + strings.TrimPrefix(page, "/")
+			prepend := directoryConfig(config, pageConfigPath).Diary
+			if err := updateSection(storage, page, firstQueryValue(sectionValues), *parsed.Text, parsed.UpdateUnixMS, prepend); err != nil {
 				switch {
 				case errors.Is(err, ErrSectionNotFound), os.IsNotExist(err):
 					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
@@ -802,7 +847,24 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 				}
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "stored"})
+			message := "stored"
+			if *parsed.Text == "" {
+				message = "deleted"
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": message})
+			return
+		}
+		if *parsed.Text == "" {
+			err := removeStoredFile(storage, page)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				if errors.Is(err, ErrWritableFS) {
+					writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "page deletion is not supported"})
+				} else {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to delete page"})
+				}
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "deleted"})
 			return
 		}
 		if err := writePage(storage, page, []byte(*parsed.Text)); err != nil {
@@ -818,8 +880,8 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if file, ok := dataFilePath(storage, r.URL.Path); ok {
-			http.ServeFile(w, r, file)
+		if file, ok := dataFileName(storage, r.URL.Path); ok {
+			http.ServeFileFS(w, r, storage, file)
 			return
 		}
 		page, conf, err := resolvePageFile(storage, r.URL.Path, config)
@@ -847,7 +909,7 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 			if pageName == "" {
 				pageName = "/"
 			}
-			editorTemplates, err := template.ParseFiles("static/editor.html")
+			editorTemplates, err := template.ParseFiles(config.templatePath("editor.html"))
 			if err != nil {
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 				return
@@ -862,7 +924,7 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 			return
 		}
 
-		if storage.Exists(page) {
+		if existsFile(storage, page) {
 			storageName, err := normalizeFSPath(page)
 			if err == nil {
 				fp, err := storage.Open(storageName)
@@ -875,12 +937,12 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 				headers := parser.ParseHeader()
 				pagePath := strings.TrimSuffix(strings.TrimPrefix(page, "/"), ".md")
 				pageContext := &templateContext{
-					Request:   r,
-					Storage:   storage,
-					Input:     parser,
-					InputPath: storageName,
-					PagePath:  pagePath,
-					Diary:     conf.Diary,
+					Request:    r,
+					FileSystem: storage,
+					Input:      parser,
+					InputPath:  storageName,
+					PagePath:   pagePath,
+					Diary:      conf.Diary,
 				}
 				loggedIn := isLoggedIn(r)
 				pageData := templateData(config, map[string]any{
@@ -898,6 +960,9 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 				})
 				if loggedIn {
 					pageData["editURL"] = editPageURL(r)
+					if conf.Diary {
+						pageData["todayEditURL"] = diaryTodayEditURL(r)
+					}
 				}
 				executeTemplate(w, templates, http.StatusOK, conf.Template, pageData)
 				return
@@ -909,9 +974,9 @@ func initHttpd(storage Storage, config *Config) http.Handler {
 			"siteTitle": config.siteTitle(config.Default),
 			"loggedIn":  isLoggedIn(r),
 			"ctx": &templateContext{
-				Request:   r,
-				Storage:   storage,
-				InputPath: "static/404.md",
+				Request:    r,
+				FileSystem: storage,
+				InputPath:  notFoundTemplatePath(config, page),
 			},
 			"config": config.Default,
 		}))
@@ -940,7 +1005,7 @@ func main() {
 	log.Printf("start server. port: %d", *port)
 	server := &http.Server{
 		Addr:    ":" + fmt.Sprint(*port),
-		Handler: initHttpd(NewLoacalStorage(*dbpath), config),
+		Handler: initHttpd(NewLocalStorage(*dbpath), config),
 	}
 	log.Fatal(server.ListenAndServe())
 }

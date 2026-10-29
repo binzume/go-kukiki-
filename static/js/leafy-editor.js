@@ -73,6 +73,9 @@ window.addEventListener('DOMContentLoaded',(function(e){
 	};
 	var status = document.getElementById('save-status');
 	var sectionInput = document.getElementById('sectionpath');
+	var sectionName = function() {
+		return sectionInput ? sectionInput.value.trim() : '';
+	};
 	var sectionUpdateUnixMS = 0;
 	var update = function() {
 		var dom = markup(editor.getValue());
@@ -201,10 +204,10 @@ window.addEventListener('DOMContentLoaded',(function(e){
 	});
 
 	var loadSection = function() {
-		var sectionName = sectionInput.value.trim();
-		var load = requestJson('GET', sectionApiUrl(pagePath, sectionName), function(json, xhr) {
+		var name = sectionName();
+		var load = requestJson('GET', sectionApiUrl(pagePath, name), function(json, xhr) {
 		if (xhr.status == 200) {
-			if (sectionName != '') {
+			if (name != '') {
 				sectionUpdateUnixMS = (json && json.updateUnixMS) || 0;
 				editor.setValue((json && json.text) || '');
 			} else {
@@ -218,7 +221,7 @@ window.addEventListener('DOMContentLoaded',(function(e){
 			editor.setValue('');
 			sectionUpdateUnixMS = 0;
 			update();
-			status.textContent = sectionName != '' ? 'New section' : 'New page';
+			status.textContent = name != '' ? 'New section' : 'New page';
 		} else {
 			status.textContent = (json && json.message) || 'Failed to load page';
 		}
@@ -226,14 +229,14 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		load.send();
 	};
 	loadSection();
-	sectionInput.addEventListener('change', loadSection);
+	if (sectionInput) sectionInput.addEventListener('change', loadSection);
 
 	document.getElementById('save-button').addEventListener('click', function(e){
 		e.preventDefault();
 
 		var pagePath = document.getElementById('pagepath').textContent.trim();
-		var sectionName = sectionInput.value.trim();
-		var save = requestJson('POST', sectionApiUrl(pagePath, sectionName), function(json, xhr) {
+		var name = sectionName();
+		var save = requestJson('POST', sectionApiUrl(pagePath, name), function(json, xhr) {
 			if (xhr.status >= 200 && xhr.status < 300) {
 				status.textContent = 'Saved';
 			} else {
@@ -242,7 +245,7 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		});
 		save.setRequestHeader('Content-Type', 'application/json');
 		var payload = {"text": editor.getValue()};
-		if (sectionName != '') payload.updateUnixMS = sectionUpdateUnixMS;
+		if (name != '') payload.updateUnixMS = sectionUpdateUnixMS;
 		save.send(JSON.stringify(payload));
 	});
 	

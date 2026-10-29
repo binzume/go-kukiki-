@@ -14,14 +14,6 @@ var ErrNotRegularFile = errors.New("storage path is not a regular file")
 
 const maxUploadSize int64 = 32 << 20
 
-type Storage interface {
-	fs.FS
-	Get(path string) ([]byte, error)
-	Exists(path string) bool
-	List(path string) []string
-	FilePath(path string) (fpath string, ok bool)
-}
-
 type WritableFS interface {
 	fs.FS
 	OpenWriter(name string, flag int) (io.WriteCloser, error)
@@ -29,7 +21,34 @@ type WritableFS interface {
 	Remove(name string) error
 }
 
-func writePage(storage Storage, path string, data []byte) error {
+func existsFile(storage fs.FS, path string) bool {
+	name, err := normalizeFSPath(path)
+	if err != nil {
+		return false
+	}
+	_, err = fs.Stat(storage, name)
+	return err == nil
+}
+
+func openStorageFile(storage fs.FS, path string) (fs.File, error) {
+	name, err := normalizeFSPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return storage.Open(name)
+}
+
+func readStorageFile(storage fs.FS, path string) ([]byte, error) {
+	file, err := openStorageFile(storage, path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func writePage(storage fs.FS, path string, data []byte) error {
 	writable, ok := storage.(WritableFS)
 	if !ok {
 		return ErrWritableFS
@@ -54,7 +73,7 @@ func writePage(storage Storage, path string, data []byte) error {
 // writeUploadedFile stores an arbitrary file through the writable storage
 // abstraction. The temporary file prevents a failed upload from truncating an
 // existing file before the new contents have been completely received.
-func writeUploadedFile(storage Storage, name string, source io.Reader) (size int64, created bool, err error) {
+func writeUploadedFile(storage fs.FS, name string, source io.Reader) (size int64, created bool, err error) {
 	writable, ok := storage.(WritableFS)
 	if !ok {
 		return 0, false, ErrWritableFS
@@ -105,7 +124,7 @@ func writeUploadedFile(storage Storage, name string, source io.Reader) (size int
 	return size, created, nil
 }
 
-func removeStoredFile(storage Storage, name string) error {
+func removeStoredFile(storage fs.FS, name string) error {
 	writable, ok := storage.(WritableFS)
 	if !ok {
 		return ErrWritableFS

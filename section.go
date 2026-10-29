@@ -59,7 +59,7 @@ func parseSectionHeader(line string) (Section, bool, error) {
 	return section, true, nil
 }
 
-func readSection(storage Storage, path, name string) (Section, error) {
+func readSection(storage fs.FS, path, name string) (Section, error) {
 	if !validSectionName(name) {
 		return Section{}, fmt.Errorf("invalid section name: %q", name)
 	}
@@ -81,33 +81,27 @@ func scanSection(reader io.Reader, name string) (Section, error) {
 	scanner := bufio.NewScanner(reader)
 	section := Section{}
 	found := false
-	inCodeFence := false
 	var body strings.Builder
 
 	for scanner.Scan() {
 		line := scanner.Text() + "\n"
-		if !inCodeFence {
-			candidate, ok, err := parseSectionHeader(line)
-			if err != nil {
-				return Section{}, err
+		candidate, ok, err := parseSectionHeader(line)
+		if err != nil {
+			return Section{}, err
+		}
+		if ok {
+			if found {
+				break
 			}
-			if ok {
-				if found {
-					break
-				}
-				if candidate.Name == name {
-					section = candidate
-					found = true
-				}
-				continue
+			if candidate.Name == name {
+				section = candidate
+				found = true
 			}
+			continue
 		}
 
 		if found {
 			body.WriteString(line)
-		}
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			inCodeFence = !inCodeFence
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -120,7 +114,7 @@ func scanSection(reader io.Reader, name string) (Section, error) {
 	return section, nil
 }
 
-func updateSection(storage Storage, path, name, body string, updateUnixMS int64) error {
+func updateSection(storage fs.FS, path, name, body string, updateUnixMS int64, prepend bool) error {
 	if !validSectionName(name) {
 		return fmt.Errorf("invalid section name: %q", name)
 	}
@@ -135,6 +129,9 @@ func updateSection(storage Storage, path, name, body string, updateUnixMS int64)
 	storageName, err := normalizeFSPath(path)
 	if err != nil {
 		return err
+	}
+	if body == "" {
+		return deleteSection(writable, storageName, name)
 	}
 	temporaryName, temporary, err := openTemporaryWriter(writable, storageName)
 	if err != nil {
@@ -162,6 +159,53 @@ func updateSection(storage Storage, path, name, body string, updateUnixMS int64)
 	}
 	if errors.Is(rewriteErr, ErrSectionNotFound) {
 		// rewriteSection has copied the original file to the temporary file.
+		if prepend {
+			if err := temporary.Close(); err != nil {
+				return err
+			}
+
+			// The section was missing, so create another temporary file with
+			// the new section before the already-copied original contents.
+			prependedName, prepended, err := openTemporaryWriter(writable, storageName)
+			if err != nil {
+				return err
+			}
+			removePrepended := true
+			defer func() {
+				if removePrepended {
+					_ = writable.Remove(prependedName)
+				}
+			}()
+
+			prependErr := writeNewSection(prepended, name, body, updateUnixMS)
+			copied, copyErr := writable.Open(temporaryName)
+			if copyErr == nil {
+				_, copyErr = io.Copy(prepended, copied)
+				closeErr := copied.Close()
+				if copyErr == nil {
+					copyErr = closeErr
+				}
+			}
+			closeErr := prepended.Close()
+			if prependErr != nil {
+				return prependErr
+			}
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if err := writable.Remove(temporaryName); err != nil {
+				return err
+			}
+			if err := writable.Rename(prependedName, storageName); err != nil {
+				return err
+			}
+			removePrepended = false
+			removeTemporary = false
+			return nil
+		}
 		rewriteErr = writeNewSection(temporary, name, body, updateUnixMS)
 	}
 	temporaryErr := temporary.Close()
@@ -181,10 +225,69 @@ func updateSection(storage Storage, path, name, body string, updateUnixMS int64)
 	return nil
 }
 
+func deleteSection(storage WritableFS, storageName, name string) error {
+	source, err := storage.Open(storageName)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	temporaryName, temporary, err := openTemporaryWriter(storage, storageName)
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = storage.Remove(temporaryName)
+		}
+	}()
+
+	rewriteErr := rewriteSection(source, temporary, name, "", 0)
+	sourceErr := source.Close()
+	temporaryErr := temporary.Close()
+	if rewriteErr != nil && !errors.Is(rewriteErr, ErrSectionNotFound) {
+		return rewriteErr
+	}
+	if sourceErr != nil {
+		return sourceErr
+	}
+	if errors.Is(rewriteErr, ErrSectionNotFound) {
+		return nil
+	}
+	if temporaryErr != nil {
+		return temporaryErr
+	}
+	if info, err := fs.Stat(storage, temporaryName); err != nil {
+		return err
+	} else if info.Size() == 0 {
+		if err := storage.Remove(temporaryName); err != nil {
+			return err
+		}
+		if err := storage.Remove(storageName); err != nil {
+			return err
+		}
+		removeTemporary = false
+		return nil
+	}
+	if err := storage.Rename(temporaryName, storageName); err != nil {
+		return err
+	}
+	removeTemporary = false
+	return nil
+}
+
 func writeNewSection(destination io.Writer, name, body string, updateUnixMS int64) error {
 	if _, err := io.WriteString(destination, formatSectionHeader(name, updateUnixMS)); err != nil {
 		return err
 	}
+	return writeSectionBody(destination, body)
+}
+
+func writeSectionBody(destination io.Writer, body string) error {
 	if body == "" {
 		return nil
 	}
@@ -218,44 +321,26 @@ func rewriteSection(source io.Reader, destination io.Writer, name, body string, 
 	scanner := bufio.NewScanner(source)
 	found := false
 	replacing := false
-	inCodeFence := false
-
-	writeBody := func() error {
-		if body == "" {
-			return nil
-		}
-		if _, err := io.WriteString(destination, body); err != nil {
-			return err
-		}
-		if !strings.HasSuffix(body, "\n") {
-			_, err := io.WriteString(destination, "\n")
-			return err
-		}
-		return nil
-	}
 
 	for scanner.Scan() {
 		line := scanner.Text() + "\n"
-		var candidate Section
-		var isHeader bool
-		if !inCodeFence {
-			var err error
-			candidate, isHeader, err = parseSectionHeader(line)
-			if err != nil {
-				return err
-			}
+		candidate, isHeader, err := parseSectionHeader(line)
+		if err != nil {
+			return err
 		}
 
 		if isHeader {
 			if replacing {
-				if err := writeBody(); err != nil {
+				if err := writeSectionBody(destination, body); err != nil {
 					return err
 				}
 				replacing = false
 			}
 			if candidate.Name == name {
-				if _, err := io.WriteString(destination, formatSectionHeader(name, updateUnixMS)); err != nil {
-					return err
+				if body != "" {
+					if _, err := io.WriteString(destination, formatSectionHeader(name, updateUnixMS)); err != nil {
+						return err
+					}
 				}
 				found = true
 				replacing = true
@@ -268,15 +353,12 @@ func rewriteSection(source io.Reader, destination io.Writer, name, body string, 
 				return err
 			}
 		}
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			inCodeFence = !inCodeFence
-		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 	if replacing {
-		if err := writeBody(); err != nil {
+		if err := writeSectionBody(destination, body); err != nil {
 			return err
 		}
 	}

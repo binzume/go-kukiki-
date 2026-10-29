@@ -1,21 +1,30 @@
 package main
 
-import "github.com/BurntSushi/toml"
+import (
+	"path/filepath"
+
+	"github.com/BurntSushi/toml"
+)
 
 // Config
 type Config struct {
-	// Title is the site-wide title. It is also accepted in the [kukiki]
-	// section below for compatibility with the existing config file layout.
-	Title     string
-	Kukiki    SiteConfig
-	Variables map[string]any
-	Default   DirConfig
-	Overrides []DirConfig
+	// Title is the site-wide title.
+	Title       string
+	TemplateDir string
+	Variables   map[string]any
+	Default     DirConfig
+	Overrides   []DirConfig
 }
 
-// SiteConfig contains site-wide settings from the [kukiki] section.
-type SiteConfig struct {
-	Title string
+func (c *Config) templateDir() string {
+	if c.TemplateDir == "" {
+		return "static"
+	}
+	return c.TemplateDir
+}
+
+func (c *Config) templatePath(name string) string {
+	return filepath.Join(c.templateDir(), name)
 }
 
 // DirConfig
@@ -31,10 +40,7 @@ func (c *Config) siteTitle(dirConfig DirConfig) string {
 	if dirConfig.Title != "" {
 		return dirConfig.Title
 	}
-	if c.Title != "" {
-		return c.Title
-	}
-	return c.Kukiki.Title
+	return c.Title
 }
 
 // LoadConfig
