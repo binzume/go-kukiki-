@@ -12,10 +12,12 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +98,8 @@ func isCodeFenceLine(line string) bool {
 }
 
 var diarySectionIDPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-`)
+var diaryDateSectionPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+var calendarDaySpanPattern = regexp.MustCompile(`<span(?: class='([^']*)')?>(.*?)</span>`)
 
 func sectionHTMLID(name string, diaryMode bool) string {
 	if diaryMode && len(name) > 8 && diarySectionIDPattern.MatchString(name) {
@@ -105,10 +109,15 @@ func sectionHTMLID(name string, diaryMode bool) string {
 }
 
 func startMarkdownSegment(out io.Writer, sectionName string, sectionEditURL func(string) string, diaryMode bool) *markdownSegment {
+	return startMarkdownSegmentWithHeadingOffset(out, sectionName, sectionEditURL, diaryMode, 0)
+}
+
+func startMarkdownSegmentWithHeadingOffset(out io.Writer, sectionName string, sectionEditURL func(string) string, diaryMode bool, baseHeadingOffset int) *markdownSegment {
 	headingOffset := 0
 	if sectionName != "" {
-		headingOffset = 1
+		headingOffset = 2
 	}
+	headingOffset += baseHeadingOffset
 	writer := &markdownLinkWriter{DocWriter: markdown.NewHTMLWriterWithHeadingOffset(out, headingOffset)}
 	section := 0
 	if sectionName != "" {
@@ -116,15 +125,15 @@ func startMarkdownSegment(out io.Writer, sectionName string, sectionEditURL func
 		section = writer.Block(markdown.MarkupData{
 			Attributes: markdown.Attributes(".section #" + sectionID),
 		})
-		// The section body writer offsets Markdown headings by one level. Use
-		// level 0 here so the section title remains the enclosing h1.
+		// The section body writer offsets Markdown headings by two levels. Use
+		// level 0 here so the section title remains the enclosing h2.
 		title := writer.Heading(0, markdown.MarkupData{})
 		fmt.Fprintf(out, "<a href='#%s'>", template.HTMLEscapeString(sectionID))
 		writer.Write(sectionName)
 		io.WriteString(out, "</a>")
 		if sectionEditURL != nil {
 			url := template.HTMLEscapeString(sectionEditURL(sectionName))
-			fmt.Fprintf(out, " <a class='section-edit' href='%s'>Edit</a>", url)
+			fmt.Fprintf(out, " [<a class='section-edit' href='%s'>Edit</a>]", url)
 		}
 		writer.End(title)
 		writer.Write("\n")
@@ -154,8 +163,16 @@ func (s *markdownSegment) close() error {
 }
 
 func renderMarkdownReader(reader io.Reader, out io.Writer, sectionEditURL func(string) string, diaryMode bool) error {
+	return renderMarkdownReaderWithHeadingOffset(reader, out, sectionEditURL, diaryMode, 0, nil)
+}
+
+func renderMarkdownReaderWithSections(reader io.Reader, out io.Writer, sectionEditURL func(string) string, diaryMode bool, sectionFound func(string)) error {
+	return renderMarkdownReaderWithHeadingOffset(reader, out, sectionEditURL, diaryMode, 0, sectionFound)
+}
+
+func renderMarkdownReaderWithHeadingOffset(reader io.Reader, out io.Writer, sectionEditURL func(string) string, diaryMode bool, headingOffset int, sectionFound func(string)) error {
 	scanner := bufio.NewScanner(reader)
-	segment := startMarkdownSegment(out, "", sectionEditURL, diaryMode)
+	segment := startMarkdownSegmentWithHeadingOffset(out, "", sectionEditURL, diaryMode, headingOffset)
 	inCodeFence := false
 
 	for scanner.Scan() {
@@ -167,10 +184,13 @@ func renderMarkdownReader(reader io.Reader, out io.Writer, sectionEditURL func(s
 				return err
 			}
 			if ok {
+				if sectionFound != nil {
+					sectionFound(section.Name)
+				}
 				if err := segment.close(); err != nil {
 					return err
 				}
-				segment = startMarkdownSegment(out, section.Name, sectionEditURL, diaryMode)
+				segment = startMarkdownSegmentWithHeadingOffset(out, section.Name, sectionEditURL, diaryMode, headingOffset)
 				continue
 			}
 		}
@@ -192,14 +212,18 @@ func renderMarkdownReader(reader io.Reader, out io.Writer, sectionEditURL func(s
 	return segmentErr
 }
 
-func renderMarkdownFile(path string, out io.Writer) error {
+func renderMarkdownFile(path string, out io.Writer, headingOffsets ...int) error {
 	fp, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer fp.Close()
 
-	return renderMarkdownReader(fp, out, nil, false)
+	headingOffset := 0
+	if len(headingOffsets) > 0 {
+		headingOffset = headingOffsets[0]
+	}
+	return renderMarkdownReaderWithHeadingOffset(fp, out, nil, false, headingOffset, nil)
 }
 
 func dataFileName(storage fs.FS, requestPath string) (string, bool) {
@@ -227,12 +251,26 @@ func parseIntDefault(str string, defvalue int) int {
 }
 
 type templateContext struct {
-	Request    *http.Request
-	FileSystem fs.FS
-	Input      io.Reader
-	InputPath  string
-	PagePath   string
-	Diary      bool
+	Request     *http.Request
+	FileSystem  fs.FS
+	Input       io.Reader
+	InputPath   string
+	PagePath    string
+	Diary       bool
+	DiaryDates  map[string]struct{}
+	DiaryMonths []DiaryMonth
+	DiaryYears  []DiaryYear
+}
+
+type DiaryMonth struct {
+	Label string
+	Month string
+	URL   string
+}
+
+type DiaryYear struct {
+	Year   string
+	Months []DiaryMonth
 }
 
 func markdownRenderer(c *templateContext) (template.HTML, error) {
@@ -267,8 +305,20 @@ func markdownRenderer(c *templateContext) (template.HTML, error) {
 		}
 	}
 
+	var sectionFound func(string)
+	if c.Diary {
+		if c.DiaryDates == nil {
+			c.DiaryDates = make(map[string]struct{})
+		}
+		sectionFound = func(name string) {
+			if diaryDateSectionPattern.MatchString(name) {
+				c.DiaryDates[name] = struct{}{}
+			}
+		}
+	}
+
 	var out bytes.Buffer
-	if err := renderMarkdownReader(reader, &out, sectionEditURL, c.Diary); err != nil {
+	if err := renderMarkdownReaderWithSections(reader, &out, sectionEditURL, c.Diary, sectionFound); err != nil {
 		return "", err
 	}
 	return template.HTML(out.String()), nil
@@ -276,9 +326,33 @@ func markdownRenderer(c *templateContext) (template.HTML, error) {
 
 // markdownFile renders a fixed Markdown file for use in a template. The
 // template owns the path, so it can be used for shared content such as a menu.
-func markdownFile(path string) (template.HTML, error) {
+func markdownFile(path string, headingOffsets ...int) (template.HTML, error) {
 	var out bytes.Buffer
-	if err := renderMarkdownFile(path, &out); err != nil {
+	if err := renderMarkdownFile(path, &out, headingOffsets...); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return template.HTML(out.String()), nil
+}
+
+func markdownStorageFile(storage fs.FS, path string, headingOffsets ...int) (template.HTML, error) {
+	file, err := openStorageFile(storage, path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer file.Close()
+
+	headingOffset := 0
+	if len(headingOffsets) > 0 {
+		headingOffset = headingOffsets[0]
+	}
+	var out bytes.Buffer
+	if err := renderMarkdownReaderWithHeadingOffset(file, &out, nil, false, headingOffset, nil); err != nil {
 		return "", err
 	}
 	return template.HTML(out.String()), nil
@@ -288,24 +362,24 @@ func printCalendar(c *templateContext) template.HTML {
 	var storage fs.FS
 	diaryMode := false
 	pagePath := ""
+	var diaryDates map[string]struct{}
 	if c != nil {
 		storage = c.FileSystem
 		diaryMode = c.Diary
 		pagePath = c.PagePath
+		diaryDates = c.DiaryDates
 	}
+	navigation := printDiaryMonthNavigation(c)
 	cal := calendar.NewCalendar()
-	if diaryMode && pagePath != "" {
-		monthName := pagePath
-		if separator := strings.LastIndexByte(monthName, '/'); separator >= 0 {
-			monthName = monthName[separator+1:]
-		}
-		if month, err := time.ParseInLocation("2006-01", monthName, time.Local); err == nil {
-			cal.Date = month
-		}
+	if month, err := time.ParseInLocation("2006-01", navigation.Label, time.Local); err == nil {
+		cal.Date = month
 	}
 	cal.LinkFunc = func(t time.Time) string {
 		path := fmt.Sprintf("%04d-%02d-%02d", t.Year(), t.Month(), t.Day())
 		if diaryMode && pagePath != "" {
+			if _, ok := diaryDates[path]; !ok {
+				return ""
+			}
 			return "/" + pagePath + "#" + sectionHTMLID(path, true)
 		}
 		if storage == nil || existsFile(storage, path+".md") {
@@ -313,8 +387,164 @@ func printCalendar(c *templateContext) template.HTML {
 		}
 		return ""
 	}
-	monthLabel := cal.Date.Format("2006-01")
-	return template.HTML(fmt.Sprintf("<h2 class='diary-calendar-month'>%s</h2>\n%s", monthLabel, cal.Html()))
+	calendarHTML := addCalendarTodayClass(cal.Html(), cal.Date, time.Now())
+	return template.HTML(calendarHTML)
+}
+
+type DiaryMonthNavigation struct {
+	Label       string
+	PreviousURL string
+	NextURL     string
+}
+
+func printDiaryMonthNavigation(c *templateContext) DiaryMonthNavigation {
+	month := time.Now()
+	diaryMode := false
+	pagePath := ""
+	var pageMonth time.Time
+	pageMonthValid := false
+	if c != nil {
+		diaryMode = c.Diary
+		pagePath = c.PagePath
+	}
+	if diaryMode && pagePath != "" {
+		monthName := pagePath
+		if separator := strings.LastIndexByte(monthName, '/'); separator >= 0 {
+			monthName = monthName[separator+1:]
+		}
+		if parsedMonth, err := time.ParseInLocation("2006-01", monthName, time.Local); err == nil {
+			pageMonth = parsedMonth
+			pageMonthValid = true
+			month = pageMonth
+		}
+	}
+	navigation := DiaryMonthNavigation{Label: month.Format("2006-01")}
+	if diaryMode && pagePath != "" && pageMonthValid {
+		navigation.PreviousURL = diaryMonthURL(pagePath, pageMonth.AddDate(0, -1, 0))
+		navigation.NextURL = diaryMonthURL(pagePath, pageMonth.AddDate(0, 1, 0))
+	}
+	return navigation
+}
+
+func addCalendarTodayClass(markup string, month, today time.Time) string {
+	if month.Year() != today.Year() || month.Month() != today.Month() {
+		return markup
+	}
+	day := strconv.Itoa(today.Day())
+	return calendarDaySpanPattern.ReplaceAllStringFunc(markup, func(value string) string {
+		match := calendarDaySpanPattern.FindStringSubmatch(value)
+		if len(match) != 3 || calendarDayText(match[2]) != day {
+			return value
+		}
+		class := strings.TrimSpace(match[1])
+		if class != "" {
+			class += " "
+		}
+		return "<span class='" + class + "today'>" + match[2] + "</span>"
+	})
+}
+
+func calendarDayText(content string) string {
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "<a ") {
+		if start := strings.IndexByte(content, '>'); start >= 0 {
+			content = content[start+1:]
+		}
+		if end := strings.LastIndex(content, "</a>"); end >= 0 {
+			content = content[:end]
+		}
+	}
+	return strings.TrimSpace(content)
+}
+
+func diaryMonthURL(pagePath string, month time.Time) string {
+	return diaryFileURL(pageDirectory(pagePath), month.Format("2006-01"))
+}
+
+func diaryFileURL(directory, name string) string {
+	directory = strings.Trim(directory, "/")
+	if directory == "" {
+		return "/" + name
+	}
+	return "/" + directory + "/" + name
+}
+
+func diaryMonths(directory string, files []string) []DiaryMonth {
+	months := make([]DiaryMonth, 0, len(files))
+	for _, file := range files {
+		label := strings.TrimSuffix(file, ".md")
+		months = append(months, DiaryMonth{
+			Label: label,
+			Month: label[len(label)-2:],
+			URL:   diaryFileURL(directory, label),
+		})
+	}
+	return months
+}
+
+// diaryYears groups the already-sorted diary files by year. The files are
+// supplied newest-first, while the months within each year are displayed in
+// calendar order to match the diary archive layout.
+func buildDiaryYears(directory string, files []string) []DiaryYear {
+	years := make([]DiaryYear, 0, len(files))
+	indexes := make(map[string]int)
+	for _, file := range files {
+		label := strings.TrimSuffix(file, ".md")
+		if len(label) != len("2006-01") {
+			continue
+		}
+		year := label[:4]
+		index, ok := indexes[year]
+		if !ok {
+			index = len(years)
+			indexes[year] = index
+			years = append(years, DiaryYear{Year: year})
+		}
+		years[index].Months = append(years[index].Months, DiaryMonth{
+			Label: label,
+			Month: label[len(label)-2:],
+			URL:   diaryFileURL(directory, label),
+		})
+	}
+	for i := range years {
+		months := years[i].Months
+		for left, right := 0, len(months)-1; left < right; left, right = left+1, right-1 {
+			months[left], months[right] = months[right], months[left]
+		}
+	}
+	return years
+}
+
+func filterDiaryYears(years []DiaryYear, startDate string) []DiaryYear {
+	startDate = strings.TrimSpace(startDate)
+	if startDate == "" {
+		return years
+	}
+
+	startMonth := ""
+	for _, layout := range []string{"2006-01-02", "2006-01"} {
+		if date, err := time.ParseInLocation(layout, startDate, time.Local); err == nil {
+			startMonth = date.Format("2006-01")
+			break
+		}
+	}
+	if startMonth == "" {
+		return years
+	}
+
+	filtered := make([]DiaryYear, 0, len(years))
+	for _, year := range years {
+		months := make([]DiaryMonth, 0, len(year.Months))
+		for _, month := range year.Months {
+			if month.Label >= startMonth {
+				months = append(months, month)
+			}
+		}
+		if len(months) > 0 {
+			filtered = append(filtered, DiaryYear{Year: year.Year, Months: months})
+		}
+	}
+	return filtered
 }
 
 func pageFile(page string) (string, error) {
@@ -333,7 +563,7 @@ var diaryFilePattern = regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])\.md$`)
 // latestDiaryFile returns the newest monthly diary directly under directory.
 // The yyyy-mm filename format makes a lexical comparison equivalent to a
 // chronological comparison.
-func latestDiaryFile(storage fs.FS, directory string) string {
+func listDiaryFiles(storage fs.FS, directory string) []string {
 	directory = strings.Trim(directory, "/")
 	readDirPath := directory
 	if readDirPath == "" {
@@ -341,27 +571,54 @@ func latestDiaryFile(storage fs.FS, directory string) string {
 	}
 	entries, err := fs.ReadDir(storage, readDirPath)
 	if err != nil {
-		return ""
+		return nil
 	}
 
-	latest := ""
+	files := make([]string, 0)
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() {
 			continue
 		}
 		name := entry.Name()
-		if !diaryFilePattern.MatchString(name) || name <= latest {
+		if !diaryFilePattern.MatchString(name) {
 			continue
 		}
-		latest = name
+		files = append(files, name)
 	}
-	if latest == "" {
+	sort.Sort(sort.Reverse(sort.StringSlice(files)))
+	return files
+}
+
+func latestDiaryFile(storage fs.FS, directory string) string {
+	files := listDiaryFiles(storage, directory)
+	if len(files) == 0 {
 		return ""
 	}
-	if directory == "" {
-		return "/" + latest
+	return diaryFileURL(directory, files[0])
+}
+
+func pageDirectory(page string) string {
+	if separator := strings.LastIndexByte(page, '/'); separator >= 0 {
+		return strings.Trim(page[:separator], "/")
 	}
-	return "/" + directory + "/" + latest
+	return ""
+}
+
+// sectionPage returns the file that contains a section. In diary mode, a
+// date-named section belongs to the monthly diary file named by its year and
+// month, regardless of the page file supplied by the editor.
+func sectionPage(config *Config, page, section string) string {
+	pageConfigPath := "/" + strings.TrimPrefix(page, "/")
+	if !directoryConfig(config, pageConfigPath).Diary || !diaryDateSectionPattern.MatchString(section) {
+		return page
+	}
+
+	directory := pageDirectory(page)
+	monthPage := section[:7] + ".md"
+	if directory == "" {
+		return monthPage
+	}
+	return directory + "/" + monthPage
 }
 
 func directoryConfig(config *Config, page string) DirConfig {
@@ -383,16 +640,30 @@ func directoryConfig(config *Config, page string) DirConfig {
 
 // resolvePageFile maps a request to the file that should be displayed. A
 // diary directory uses its newest monthly diary instead of index.md.
-func resolvePageFile(storage fs.FS, requestPath string, config *Config) (string, DirConfig, error) {
+func resolvePageFileWithDiaryFiles(storage fs.FS, requestPath string, config *Config) (string, DirConfig, []string, error) {
 	page, err := pageFile(requestPath)
 	if err != nil {
-		return "", DirConfig{}, err
+		return "", DirConfig{}, nil, err
 	}
 	conf := directoryConfig(config, page)
+	var diaryFiles []string
 	if conf.Diary && strings.HasSuffix(page, "/index.md") {
-		page = latestDiaryFile(storage, strings.TrimSuffix(page, "index.md"))
+		directory := pageDirectory(page)
+		diaryFiles = listDiaryFiles(storage, directory)
+		if len(diaryFiles) > 0 {
+			page = diaryFileURL(directory, diaryFiles[0])
+		} else {
+			page = ""
+		}
+	} else if conf.Diary {
+		diaryFiles = listDiaryFiles(storage, pageDirectory(page))
 	}
-	return page, conf, nil
+	return page, conf, diaryFiles, nil
+}
+
+func resolvePageFile(storage fs.FS, requestPath string, config *Config) (string, DirConfig, error) {
+	page, conf, _, err := resolvePageFileWithDiaryFiles(storage, requestPath, config)
+	return page, conf, err
 }
 
 // Breadcrumb is one item in the page hierarchy shown above a page.
@@ -414,8 +685,12 @@ func buildBreadcrumbs(storage fs.FS, pagePath, siteTitle string) []Breadcrumb {
 }
 
 func buildBreadcrumbsWithConfig(storage fs.FS, pagePath, siteTitle string, config *Config) []Breadcrumb {
+	return buildBreadcrumbsWithConfigAndDiaryFiles(storage, pagePath, siteTitle, config, "", nil)
+}
+
+func buildBreadcrumbsWithConfigAndDiaryFiles(storage fs.FS, pagePath, siteTitle string, config *Config, diaryDirectory string, diaryFiles []string) []Breadcrumb {
 	cleanPath := strings.Trim(pagePath, "/")
-	if cleanPath == "" {
+	if cleanPath == "" || cleanPath == "index.md" {
 		return nil
 	}
 
@@ -425,12 +700,24 @@ func buildBreadcrumbsWithConfig(storage fs.FS, pagePath, siteTitle string, confi
 		breadcrumbs[0].Title = "Home"
 	}
 
-	for i := 0; i < len(parts)-1; i++ {
+	directoryCount := len(parts) - 1
+	if strings.HasSuffix(cleanPath, "/index.md") || cleanPath == "index.md" {
+		directoryCount--
+	}
+	for i := 0; i < directoryCount; i++ {
 		directory := strings.Join(parts[:i+1], "/")
 		title := parts[i]
 		indexPage := "/" + directory + "/index.md"
 		if config != nil && directoryConfig(config, indexPage).Diary {
-			if latest := latestDiaryFile(storage, directory); latest != "" {
+			latest := ""
+			if directory == diaryDirectory && diaryFiles != nil {
+				if len(diaryFiles) > 0 {
+					latest = diaryFileURL(directory, diaryFiles[0])
+				}
+			} else {
+				latest = latestDiaryFile(storage, directory)
+			}
+			if latest != "" {
 				title = storagePageTitle(storage, latest)
 			}
 		} else if indexTitle := storagePageTitle(storage, indexPage); indexTitle != "" {
@@ -453,12 +740,27 @@ func editPageURL(r *http.Request) string {
 	return u.String()
 }
 
+func editReturnURL(r *http.Request) string {
+	u := *r.URL
+	query := u.Query()
+	query.Del("edit")
+	query.Del("section")
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
 func diaryTodayEditURL(r *http.Request) string {
 	u := *r.URL
-	directory := strings.TrimRight(u.Path, "/")
-	if separator := strings.LastIndexByte(directory, '/'); separator >= 0 {
-		directory = directory[:separator+1]
-	} else {
+	directory := u.Path
+	if !strings.HasSuffix(directory, "/") {
+		directory = strings.TrimRight(directory, "/")
+		if separator := strings.LastIndexByte(directory, '/'); separator >= 0 {
+			directory = directory[:separator+1]
+		} else {
+			directory = "/"
+		}
+	}
+	if directory == "" {
 		directory = "/"
 	}
 	u.Path = directory
@@ -617,6 +919,25 @@ func writeText(w http.ResponseWriter, status int, data []byte) {
 	_, _ = w.Write(data)
 }
 
+func setLastModified(w http.ResponseWriter, info fs.FileInfo) {
+	if info == nil || info.ModTime().IsZero() {
+		return
+	}
+	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+}
+
+func setLastModifiedFromStorage(w http.ResponseWriter, storage fs.FS, path string) {
+	name, err := normalizeFSPath(path)
+	if err != nil {
+		return
+	}
+	info, err := fs.Stat(storage, name)
+	if err != nil {
+		return
+	}
+	setLastModified(w, info)
+}
+
 func apiPagePath(r *http.Request) string {
 	page := r.PathValue("page")
 	if page == "" {
@@ -636,13 +957,7 @@ func executeTemplate(w http.ResponseWriter, templates *template.Template, status
 	_, _ = w.Write(output.Bytes())
 }
 
-func notFoundTemplatePath(config *Config, page string) string {
-	if page == "/index.md" {
-		topPath := config.templatePath("404_top.md")
-		if info, err := os.Stat(topPath); err == nil && info.Mode().IsRegular() {
-			return topPath
-		}
-	}
+func notFoundTemplatePath(config *Config) string {
 	return config.templatePath("404.md")
 }
 
@@ -667,9 +982,13 @@ func templateData(config *Config, data map[string]any) map[string]any {
 
 func initHttpd(storage fs.FS, config *Config) http.Handler {
 	templates, err := template.New("root").Funcs(template.FuncMap{
-		"markdown":     markdownRenderer,
-		"markdownFile": markdownFile,
-		"calender":     printCalendar,
+		"markdown": markdownRenderer,
+		"markdownFile": func(path string, headingOffsets ...int) (template.HTML, error) {
+			return markdownStorageFile(storage, path, headingOffsets...)
+		},
+		"calender":             printCalendar,
+		"diaryMonthNavigation": printDiaryMonthNavigation,
+		"diaryYears":           filterDiaryYears,
 	}).ParseGlob(filepath.Join(config.templateDir(), "*.html"))
 	if err != nil {
 		panic(err)
@@ -677,8 +996,8 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 
 	mux := http.NewServeMux()
 
-	mux.Handle("/css/", http.StripPrefix("/css/", http.FileServerFS(os.DirFS("static/css"))))
-	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServerFS(os.DirFS("static/js"))))
+	mux.Handle("/css/", http.StripPrefix("/css/", http.FileServerFS(os.DirFS(filepath.Join(config.templateDir(), "css")))))
+	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServerFS(os.DirFS(filepath.Join(config.templateDir(), "js")))))
 
 	mux.HandleFunc("GET /login.html", func(w http.ResponseWriter, r *http.Request) {
 		executeTemplate(w, templates, http.StatusOK, "login.html", templateData(config, map[string]any{
@@ -771,7 +1090,8 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 			return
 		}
 		if sectionName, ok := r.URL.Query()["section"]; ok {
-			section, err := readSection(storage, page, firstQueryValue(sectionName))
+			sectionName := firstQueryValue(sectionName)
+			section, err := readSection(storage, sectionPage(config, page, sectionName), sectionName)
 			if err != nil {
 				if errors.Is(err, ErrSectionNotFound) || os.IsNotExist(err) {
 					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
@@ -792,6 +1112,7 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 			return
 		}
 		if data, err := readStorageFile(storage, page); err == nil {
+			setLastModifiedFromStorage(w, storage, page)
 			writeText(w, http.StatusOK, data)
 		} else if os.IsNotExist(err) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "page not found"})
@@ -830,9 +1151,11 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 			return
 		}
 		if sectionValues, ok := r.URL.Query()["section"]; ok {
-			pageConfigPath := "/" + strings.TrimPrefix(page, "/")
+			sectionName := firstQueryValue(sectionValues)
+			targetPage := sectionPage(config, page, sectionName)
+			pageConfigPath := "/" + strings.TrimPrefix(targetPage, "/")
 			prepend := directoryConfig(config, pageConfigPath).Diary
-			if err := updateSection(storage, page, firstQueryValue(sectionValues), *parsed.Text, parsed.UpdateUnixMS, prepend); err != nil {
+			if err := updateSection(storage, targetPage, sectionName, *parsed.Text, parsed.UpdateUnixMS, prepend); err != nil {
 				switch {
 				case errors.Is(err, ErrSectionNotFound), os.IsNotExist(err):
 					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
@@ -884,7 +1207,7 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 			http.ServeFileFS(w, r, storage, file)
 			return
 		}
-		page, conf, err := resolvePageFile(storage, r.URL.Path, config)
+		page, conf, diaryFiles, err := resolvePageFileWithDiaryFiles(storage, r.URL.Path, config)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
 			return
@@ -918,12 +1241,17 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 				"title":     "It works!",
 				"siteTitle": config.siteTitle(config.Default),
 				"page":      pageName,
+				"returnURL": editReturnURL(r),
 				"section":   r.URL.Query().Get("section"),
 				"loggedIn":  true,
 			}))
 			return
 		}
 
+		breadcrumbPage := page
+		if requestedPage, err := pageFile(r.URL.Path); err == nil {
+			breadcrumbPage = requestedPage
+		}
 		if existsFile(storage, page) {
 			storageName, err := normalizeFSPath(page)
 			if err == nil {
@@ -933,6 +1261,9 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 					return
 				}
 				defer fp.Close()
+				if info, err := fp.Stat(); err == nil {
+					setLastModified(w, info)
+				}
 				parser := NewParser(fp)
 				headers := parser.ParseHeader()
 				pagePath := strings.TrimSuffix(strings.TrimPrefix(page, "/"), ".md")
@@ -943,17 +1274,20 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 					InputPath:  storageName,
 					PagePath:   pagePath,
 					Diary:      conf.Diary,
+					DiaryYears: buildDiaryYears(pageDirectory(page), diaryFiles),
 				}
 				loggedIn := isLoggedIn(r)
 				pageData := templateData(config, map[string]any{
 					"title":     headers["title"],
 					"siteTitle": config.siteTitle(conf),
 					"loggedIn":  loggedIn,
-					"breadcrumbs": buildBreadcrumbsWithConfig(
+					"breadcrumbs": buildBreadcrumbsWithConfigAndDiaryFiles(
 						storage,
-						page,
+						breadcrumbPage,
 						config.siteTitle(conf),
 						config,
+						pageDirectory(breadcrumbPage),
+						diaryFiles,
 					),
 					"ctx":    pageContext,
 					"config": conf,
@@ -969,17 +1303,34 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 			}
 		}
 
-		executeTemplate(w, templates, http.StatusNotFound, config.Default.Template, templateData(config, map[string]any{
+		notFoundContext := &templateContext{
+			Request:    r,
+			FileSystem: storage,
+			InputPath:  notFoundTemplatePath(config),
+			PagePath:   strings.TrimSuffix(strings.TrimPrefix(page, "/"), ".md"),
+			Diary:      conf.Diary,
+			DiaryYears: buildDiaryYears(pageDirectory(page), diaryFiles),
+		}
+		loggedIn := isLoggedIn(r)
+		notFoundData := templateData(config, map[string]any{
 			"title":     "404 Not Found",
-			"siteTitle": config.siteTitle(config.Default),
-			"loggedIn":  isLoggedIn(r),
-			"ctx": &templateContext{
-				Request:    r,
-				FileSystem: storage,
-				InputPath:  notFoundTemplatePath(config, page),
-			},
-			"config": config.Default,
-		}))
+			"siteTitle": config.siteTitle(conf),
+			"loggedIn":  loggedIn,
+			"breadcrumbs": buildBreadcrumbsWithConfigAndDiaryFiles(
+				storage,
+				breadcrumbPage,
+				config.siteTitle(conf),
+				config,
+				pageDirectory(breadcrumbPage),
+				diaryFiles,
+			),
+			"ctx":       notFoundContext,
+			"config":    conf,
+		})
+		if loggedIn && conf.Diary {
+			notFoundData["todayEditURL"] = diaryTodayEditURL(r)
+		}
+		executeTemplate(w, templates, http.StatusNotFound, conf.Template, notFoundData)
 	})
 
 	return loggingMiddleware(mux)
@@ -987,6 +1338,9 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 
 func main() {
 	port := flag.Int("p", 8080, "http port")
+	listenInterface := ""
+	flag.StringVar(&listenInterface, "listen", "", "http listen interface/address")
+	flag.StringVar(&listenInterface, "i", "", "http listen interface/address (alias for -listen)")
 	// dbtype := flag.String("t", "leveldb", "datastore type")
 	dbpath := flag.String("d", "data", "datastore uri(s) or path")
 	confFile := flag.String("c", "conf/kukiki.toml", "config file")
@@ -1002,9 +1356,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("start server. port: %d", *port)
+	addr := net.JoinHostPort(listenInterface, strconv.Itoa(*port))
+	log.Printf("start server. address: %s", addr)
 	server := &http.Server{
-		Addr:    ":" + fmt.Sprint(*port),
+		Addr:    addr,
 		Handler: initHttpd(NewLocalStorage(*dbpath), config),
 	}
 	log.Fatal(server.ListenAndServe())

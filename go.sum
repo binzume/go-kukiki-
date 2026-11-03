@@ -2,3 +2,5 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/binzume/go-calendar v0.0.0-20171112181104-54c73fb38c74 h1:eVAnn6tieTNXe8UKbjAJMaDH4LOpYpVu3jnqLkGUjZY=
 github.com/binzume/go-calendar v0.0.0-20171112181104-54c73fb38c74/go.mod h1:Z8xgX87HSEBeb6R+OKFircuQc70epgz29rPWEdy2pQY=
+github.com/binzume/go-markdown v0.0.0-20261101092008-f41bc5a03146 h1:3v/cTdzCw85QvpYwzmZDxt1eOsV7ka0VhKg/oVRpMQ4=
+github.com/binzume/go-markdown v0.0.0-20261101092008-f41bc5a03146/go.mod h1:MI1ia45F3FLQu154PbferPqm+BXOWShcvAIT1lpwyFs=

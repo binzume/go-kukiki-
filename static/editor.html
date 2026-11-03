@@ -14,7 +14,7 @@
   Leafy Editor
 </header>
 
-Page: <span id="pagepath">{{.page}}</span>
+Page: {{if .returnURL}}<a id="pagepath" href="{{.returnURL}}">{{.page}}</a>{{else}}<span id="pagepath">{{.page}}</span>{{end}}
 {{if .section}}
 Section: <input type="text" id="sectionpath" value="{{.section}}" />
 {{end}}

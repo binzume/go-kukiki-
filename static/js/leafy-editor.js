@@ -229,7 +229,11 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		load.send();
 	};
 	loadSection();
-	if (sectionInput) sectionInput.addEventListener('change', loadSection);
+	if (sectionInput) sectionInput.addEventListener('change', function() {
+		// Keep the current editor content when changing the target section.
+		// The timestamp belongs to the previously loaded section.
+		sectionUpdateUnixMS = 0;
+	});
 
 	document.getElementById('save-button').addEventListener('click', function(e){
 		e.preventDefault();

@@ -46,6 +46,12 @@ func (c *Config) siteTitle(dirConfig DirConfig) string {
 // LoadConfig
 func LoadConfig(confFile string) (*Config, error) {
 	var config Config
+
+	// default
+	config.Title = "Kukiki-"
+	config.TemplateDir = "static"
+	config.Default.Template = "template.html"
+
 	_, err := toml.DecodeFile(confFile, &config)
 	if err != nil {
 		return nil, err

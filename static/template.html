@@ -12,7 +12,7 @@
 {{if or .loggedIn .editURL}}
 <nav class="page-links" aria-label="Page actions">
 {{if .loggedIn}}<a href="/logout">ログアウト</a>{{end}}
-{{if .editURL}}<a href="{{.editURL}}">Edit</a>{{end}}
+{{if .editURL}}[<a href="{{.editURL}}">Edit</a>]{{end}}
 </nav>
 {{end}}
 {{if .breadcrumbs}}

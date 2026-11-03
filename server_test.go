@@ -89,6 +89,124 @@ func TestMissingPageReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestMissingPageIncludesRequestedBreadcrumbs(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "docs/index.md", []byte("# Docs")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	config := &Config{
+		Title:   "Kukiki Site",
+		Default: DirConfig{Template: "template.html"},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/docs/missing", nil)
+	response := httptest.NewRecorder()
+	initHttpd(storage, config).ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusNotFound, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, item := range []string{
+		`<nav class="breadcrumbs"`,
+		`<a href="/">Kukiki Site</a>`,
+		`<a href="/docs/">Docs</a>`,
+	} {
+		if !strings.Contains(body, item) {
+			t.Errorf("missing breadcrumb item %q: %s", item, body)
+		}
+	}
+}
+
+func TestMissingPageUsesDirectoryOverride(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	config := &Config{
+		Default:   DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{Prefix: "/diary/", Template: "binzume.html", Diary: true, Title: "Diary"}},
+	}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/diary/missing")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading response failed: %v", err)
+	}
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	if !strings.Contains(string(body), `<link rel="stylesheet" href="/css/binzume.css" />`) {
+		t.Errorf("override template was not used: %s", body)
+	}
+	if !strings.Contains(string(body), "<title>404 Not Found - Diary</title>") {
+		t.Errorf("override title was not used: %s", body)
+	}
+}
+
+func TestMissingDiaryPageDoesNotFailWhenMenuIsAbsent(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	config := &Config{
+		Default:   DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{Prefix: "/diary/", Template: "binzume-diary.html", Diary: true}},
+	}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/diary/")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading response failed: %v", err)
+	}
+	if !strings.Contains(string(body), "404 Not Found") {
+		t.Errorf("404 body is missing: %s", body)
+	}
+}
+
+func TestMissingDiaryPageIncludesRequestedBreadcrumbs(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "index.md", []byte("# Home")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	config := &Config{
+		Title:   "Kukiki Site",
+		Default: DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{
+			Prefix:   "/diary/",
+			Template: "template.html",
+			Diary:    true,
+		}},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/diary/missing", nil)
+	response := httptest.NewRecorder()
+	initHttpd(storage, config).ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusNotFound, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, item := range []string{
+		`<nav class="breadcrumbs"`,
+		`<a href="/">Kukiki Site</a>`,
+		`<a href="/diary/">diary</a>`,
+	} {
+		if !strings.Contains(body, item) {
+			t.Errorf("missing breadcrumb item %q: %s", item, body)
+		}
+	}
+}
+
 func enableTestAuth(t *testing.T) *http.Cookie {
 	previousAuth := auth
 	auth = &AuthConfig{
@@ -469,6 +587,75 @@ func TestDiarySectionAPIPrependsNewSection(t *testing.T) {
 	}
 }
 
+func TestDiarySectionAPIRoutesBySectionMonth(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "diary/2025-10.md", []byte("&[2025-10-31]\nOctober\n")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	if err := writePage(storage, "diary/2025-11.md", []byte("&[2025-11-01]\nNovember\n")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	config := &Config{
+		Default:   DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{Prefix: "/diary/", Template: "template.html", Diary: true}},
+	}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/api/pages/diary/2025-10?section=2025-11-01")
+	if err != nil {
+		t.Fatalf("section get failed: %v", err)
+	}
+	var got struct {
+		Section string `json:"section"`
+		Text    string `json:"text"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		res.Body.Close()
+		t.Fatalf("decoding section response failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || got.Section != "2025-11-01" || got.Text != "November\n" {
+		t.Fatalf("section get = (%d, %#v), want (%d, section from November)", res.StatusCode, got, http.StatusOK)
+	}
+
+	cookie := enableTestAuth(t)
+	request, err := http.NewRequest(
+		http.MethodPost,
+		ts.URL+"/api/pages/diary/2025-10?section=2025-11-02",
+		strings.NewReader(`{"text":"Moved to November","updateUnixMS":0}`),
+	)
+	if err != nil {
+		t.Fatalf("section save request creation failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	res, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("section save failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("section save status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+
+	data, err := readStorageFile(storage, "diary/2025-10.md")
+	if err != nil {
+		t.Fatalf("reading October diary failed: %v", err)
+	}
+	if string(data) != "&[2025-10-31]\nOctober\n" {
+		t.Errorf("October diary was changed: %q", data)
+	}
+	data, err = readStorageFile(storage, "diary/2025-11.md")
+	if err != nil {
+		t.Fatalf("reading November diary failed: %v", err)
+	}
+	want := "&[2025-11-02]\nMoved to November\n&[2025-11-01]\nNovember\n"
+	if string(data) != want {
+		t.Errorf("November diary = %q, want %q", data, want)
+	}
+}
+
 func TestEditDirectoryRedirect(t *testing.T) {
 	storage := NewLocalStorage(t.TempDir())
 	config := &Config{Default: DirConfig{Template: "template.html"}}
@@ -504,6 +691,15 @@ func TestDiaryTodayEditURL(t *testing.T) {
 	if got.Query().Get("from") != "test" || got.Fragment != "" {
 		t.Errorf("diaryTodayEditURL retained unexpected URL parts: %q", got.String())
 	}
+
+	request = httptest.NewRequest(http.MethodGet, "/diary/", nil)
+	got, err = url.Parse(diaryTodayEditURL(request))
+	if err != nil {
+		t.Fatalf("diaryTodayEditURL returned an invalid directory URL: %v", err)
+	}
+	if got.Path != "/diary/" {
+		t.Errorf("diaryTodayEditURL directory path = %q, want %q", got.Path, "/diary/")
+	}
 }
 
 func TestExistingPageHasEditLink(t *testing.T) {
@@ -536,8 +732,32 @@ func TestExistingPageHasEditLink(t *testing.T) {
 	if !strings.Contains(string(body), `href="/docs/guide?edit=&amp;from=test"`) {
 		t.Errorf("edit link is missing from response: %s", body)
 	}
-	if !strings.Contains(string(body), `class="side-menu"`) || !strings.Contains(string(body), "href='/'") {
-		t.Errorf("fixed Markdown menu is missing from response: %s", body)
+	if !strings.Contains(string(body), `[<a href="/docs/guide?edit=&amp;from=test">Edit</a>]`) {
+		t.Errorf("edit link is not surrounded by non-link brackets: %s", body)
+	}
+}
+
+func TestPageLastModifiedHeader(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "docs/guide.md", []byte("# Guide")); err != nil {
+		t.Fatalf("storage.Store returned an error: %v", err)
+	}
+	modified := time.Date(2026, time.October, 31, 12, 34, 56, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(storage.base, "docs", "guide.md"), modified, modified); err != nil {
+		t.Fatalf("os.Chtimes returned an error: %v", err)
+	}
+	config := &Config{Default: DirConfig{Template: "template.html"}}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/docs/guide")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if got, want := res.Header.Get("Last-Modified"), modified.Format(http.TimeFormat); got != want {
+		t.Errorf("Last-Modified = %q, want %q", got, want)
 	}
 }
 
@@ -594,6 +814,28 @@ func TestConfigTemplateDir(t *testing.T) {
 	}
 }
 
+func TestCustomTemplateDirServesCSS(t *testing.T) {
+	templateDir := t.TempDir()
+	for _, name := range []string{"template.html", "login.html", "editor.html"} {
+		if err := os.WriteFile(filepath.Join(templateDir, name), []byte("{{define \""+strings.TrimSuffix(name, ".html")+"\"}}<html></html>{{end}}"), 0644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(templateDir, "css"), 0755); err != nil {
+		t.Fatalf("creating css directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(templateDir, "css", "style.css"), []byte("custom css"), 0644); err != nil {
+		t.Fatalf("writing custom css: %v", err)
+	}
+
+	server := initHttpd(NewLocalStorage(t.TempDir()), &Config{TemplateDir: templateDir})
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/css/style.css", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "custom css" {
+		t.Fatalf("custom css response = (%d, %q), want (200, %q)", response.Code, response.Body.String(), "custom css")
+	}
+}
+
 func TestNotFoundTemplatePath(t *testing.T) {
 	templateDir := t.TempDir()
 	config := &Config{TemplateDir: templateDir}
@@ -601,19 +843,14 @@ func TestNotFoundTemplatePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := notFoundTemplatePath(config, "/docs/missing.md"); got != filepath.Join(templateDir, "404.md") {
-		t.Errorf("non-root 404 template = %q, want 404.md", got)
+	if got := notFoundTemplatePath(config); got != filepath.Join(templateDir, "404.md") {
+		t.Errorf("404 template = %q, want 404.md", got)
 	}
-	if got := notFoundTemplatePath(config, "/index.md"); got != filepath.Join(templateDir, "404.md") {
-		t.Errorf("fallback 404 template = %q, want 404.md", got)
-	}
-
-	topPath := filepath.Join(templateDir, "404_top.md")
-	if err := os.WriteFile(topPath, []byte("top not found"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(templateDir, "404_top.md"), []byte("top not found"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if got := notFoundTemplatePath(config, "/index.md"); got != topPath {
-		t.Errorf("root 404 template = %q, want %q", got, topPath)
+	if got := notFoundTemplatePath(config); got != filepath.Join(templateDir, "404.md") {
+		t.Errorf("404 template with 404_top.md present = %q, want 404.md", got)
 	}
 }
 
@@ -752,6 +989,30 @@ func TestPageBreadcrumbsFallBackToDirectoryNames(t *testing.T) {
 	}
 }
 
+func TestPageBreadcrumbsDoNotIncludeCurrentIndex(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "software/index.md", []byte("# Software")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+
+	got := buildBreadcrumbs(storage, "/software/index.md", "Kukiki Site")
+	want := []Breadcrumb{{Title: "Kukiki Site", URL: "/"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("breadcrumbs = %#v, want %#v", got, want)
+	}
+}
+
+func TestPageBreadcrumbsDoNotIncludeRootIndex(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "index.md", []byte("# Home")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+
+	if got := buildBreadcrumbs(storage, "/index.md", "Kukiki Site"); got != nil {
+		t.Errorf("breadcrumbs = %#v, want nil", got)
+	}
+}
+
 func TestEditingRequiresLogin(t *testing.T) {
 	previousAuth := auth
 	auth = &AuthConfig{
@@ -846,6 +1107,9 @@ func TestEditorSectionInputOnlyAppearsWhenRequested(t *testing.T) {
 	if strings.Contains(response.Body.String(), `id="sectionpath"`) {
 		t.Errorf("editor without a section contains the section input: %s", response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), `<a id="pagepath" href="/docs/guide">docs/guide</a>`) {
+		t.Errorf("page name is not a return link in editor: %s", response.Body.String())
+	}
 
 	request = httptest.NewRequest(http.MethodGet, "/docs/guide?edit&section=today", nil)
 	request.AddCookie(cookie)
@@ -853,6 +1117,9 @@ func TestEditorSectionInputOnlyAppearsWhenRequested(t *testing.T) {
 	r.ServeHTTP(response, request)
 	if !strings.Contains(response.Body.String(), `id="sectionpath"`) || !strings.Contains(response.Body.String(), `value="today"`) {
 		t.Errorf("editor with a section is missing the section input: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `<a id="pagepath" href="/docs/guide">docs/guide</a>`) {
+		t.Errorf("page name is not a return link in section editor: %s", response.Body.String())
 	}
 }
 
@@ -905,7 +1172,7 @@ func TestLogoutLinkOnlyAppearsForAuthenticatedPages(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: auth.CreateSessionString(&auth.Accounts[0])})
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if !strings.Contains(response.Body.String(), `<nav class="page-links"`) || !strings.Contains(response.Body.String(), `<a href="/logout">ログアウト</a>`) || !strings.Contains(response.Body.String(), `>Edit</a>`) {
+	if !strings.Contains(response.Body.String(), `<nav class="page-links"`) || !strings.Contains(response.Body.String(), `<a href="/logout">ログアウト</a>`) || !strings.Contains(response.Body.String(), `[<a href="/?edit=">Edit</a>]`) {
 		t.Errorf("authenticated page is missing the logout link: %s", response.Body.String())
 	}
 }
@@ -999,6 +1266,69 @@ func TestDiaryDirectoryDisplaysLatestDiary(t *testing.T) {
 	if strings.Contains(string(body), "Index must not be displayed") || strings.Contains(string(body), "Older diary") {
 		t.Errorf("diary directory rendered the wrong page: %s", body)
 	}
+	if strings.Contains(string(body), `<a href="/diary/">`) {
+		t.Errorf("diary directory included itself in breadcrumbs: %s", body)
+	}
+}
+
+func TestDiaryDirectoryDisplaysArchiveLinks(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	for path, content := range map[string]string{
+		"diary/2025-01.md": "&[2025-01-01]\nJanuary",
+		"diary/2025-02.md": "&[2025-02-01]\nFebruary",
+		"diary/2024-12.md": "&[2024-12-01]\nDecember",
+	} {
+		if err := writePage(storage, path, []byte(content)); err != nil {
+			t.Fatalf("writePage(storage, %q) returned an error: %v", path, err)
+		}
+	}
+	config := &Config{
+		Default:   DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{Prefix: "/diary/", Template: "binzume-diary.html", Diary: true}},
+	}
+	ts := httptest.NewServer(initHttpd(storage, config))
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/diary/")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		t.Fatalf("reading response failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", res.StatusCode, http.StatusOK, body)
+	}
+	for _, want := range []string{
+		`<h3>2025</h3>`,
+		`<a href="/diary/2025-01">[01]</a>`,
+		`<a href="/diary/2025-02">[02]</a>`,
+		`<h3>2024</h3>`,
+		`<a href="/diary/2024-12">[12]</a>`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("archive link %q is missing: %s", want, body)
+		}
+	}
+	if strings.Index(string(body), "<h3>2025</h3>") > strings.Index(string(body), "<h3>2024</h3>") {
+		t.Errorf("archive years are not ordered newest-first: %s", body)
+	}
+}
+
+func TestFilterDiaryYears(t *testing.T) {
+	years := buildDiaryYears("diary", []string{"2025-02.md", "2025-01.md", "1999-04.md", "1999-03.md"})
+	filtered := filterDiaryYears(years, "1999-04-01")
+	if len(filtered) != 2 || filtered[0].Year != "2025" || filtered[1].Year != "1999" {
+		t.Fatalf("filtered years = %#v, want 2025 and 1999", filtered)
+	}
+	if len(filtered[1].Months) != 1 || filtered[1].Months[0].Month != "04" {
+		t.Errorf("filtered 1999 months = %#v, want only 04", filtered[1].Months)
+	}
+	if got := filterDiaryYears(years, ""); len(got) != len(years) {
+		t.Errorf("empty start date filtered years = %#v", got)
+	}
 }
 
 func TestLocalStorageRejectsInvalidPaths(t *testing.T) {
@@ -1079,11 +1409,11 @@ func TestRenderMarkdownSectionsFromParserReader(t *testing.T) {
 	got := output.String()
 	for _, want := range []string{
 		"<div class='section' id='today'>",
-		"<h1><a href='#today'>today</a></h1>",
-		"<h2>Subheading</h2>",
+		"<h2><a href='#today'>today</a></h2>",
+		"<h3>Subheading</h3>",
 		"<p>Today</p>",
 		"<div class='section' id='tomorrow'>",
-		"<h1><a href='#tomorrow'>tomorrow</a></h1>",
+		"<h2><a href='#tomorrow'>tomorrow</a></h2>",
 		"<p>Tomorrow</p>",
 	} {
 		if !strings.Contains(got, want) {
@@ -1106,11 +1436,28 @@ func TestRenderMarkdownDiarySectionIDs(t *testing.T) {
 	got := output.String()
 	for _, want := range []string{
 		"<div class='section' id='27'>",
-		"<h1><a href='#27'>2026-10-27</a></h1>",
+		"<h2><a href='#27'>2026-10-27</a></h2>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("diary section rendering is missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestRenderMarkdownHeadingOffset(t *testing.T) {
+	var output bytes.Buffer
+	if err := renderMarkdownReaderWithHeadingOffset(
+		strings.NewReader("# Menu\n\nItem"),
+		&output,
+		nil,
+		false,
+		2,
+		nil,
+	); err != nil {
+		t.Fatalf("renderMarkdownReaderWithHeadingOffset returned an error: %v", err)
+	}
+	if got := output.String(); !strings.Contains(got, "<h3>Menu</h3>") {
+		t.Errorf("heading offset was not applied: %s", got)
 	}
 }
 
@@ -1120,11 +1467,62 @@ func TestPrintCalenderIncludesMonthLabel(t *testing.T) {
 		PagePath: "diary/2026-10",
 	}))
 
-	if !strings.Contains(got, "<h2 class='diary-calendar-month'>2026-10</h2>") {
-		t.Errorf("calendar month label is missing: %s", got)
+	if !strings.Contains(got, "<table class='calendar'>") {
+		t.Errorf("calendar table is missing: %s", got)
 	}
-	if strings.Index(got, "<h2 class='diary-calendar-month'>") > strings.Index(got, "<table class='calendar'>") {
-		t.Errorf("calendar month label is not above the calendar: %s", got)
+}
+
+func TestDiaryMonthNavigationIncludesMonthLinks(t *testing.T) {
+	got := printDiaryMonthNavigation(&templateContext{
+		Diary:    true,
+		PagePath: "diary/2026-10",
+	})
+	if got.Label != "2026-10" {
+		t.Errorf("month navigation label = %q, want %q", got.Label, "2026-10")
+	}
+	if got.PreviousURL != "/diary/2026-09" || got.NextURL != "/diary/2026-11" {
+		t.Errorf("month navigation links = (%q, %q)", got.PreviousURL, got.NextURL)
+	}
+}
+
+func TestAddCalendarTodayClass(t *testing.T) {
+	markup := "<table><tr><td><span class='dayoff'>1</span></td><td><span><a href='/diary#02'>2</a></span></td></tr></table>"
+	got := addCalendarTodayClass(
+		markup,
+		time.Date(2026, time.November, 1, 0, 0, 0, 0, time.Local),
+		time.Date(2026, time.November, 2, 0, 0, 0, 0, time.Local),
+	)
+	if !strings.Contains(got, "<span class='today'><a href='/diary#02'>2</a></span>") {
+		t.Errorf("today class is missing: %s", got)
+	}
+	if strings.Contains(got, "dayoff today") {
+		t.Errorf("today class was added to the wrong day: %s", got)
+	}
+}
+
+func TestPrintCalendarLinksOnlyRenderedDiarySections(t *testing.T) {
+	ctx := &templateContext{
+		Diary:    true,
+		PagePath: "diary/2026-10",
+		Input: strings.NewReader(
+			"&[2026-10-01]\n\nfirst\n\n&[2026-10-03]\n\nthird\n",
+		),
+	}
+	if _, err := markdownRenderer(ctx); err != nil {
+		t.Fatalf("markdownRenderer returned an error: %v", err)
+	}
+
+	got := string(printCalendar(ctx))
+	for _, want := range []string{
+		"href='/diary/2026-10#01'",
+		"href='/diary/2026-10#03'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("calendar is missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "#02") {
+		t.Errorf("calendar linked a date without a diary section: %s", got)
 	}
 }
 
@@ -1161,5 +1559,20 @@ func TestMarkdownFile(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "href='/'") {
 		t.Errorf("rendered link was not rewritten: %s", got)
+	}
+}
+
+func TestMarkdownStorageFileUsesStorageRoot(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "diary/menu.md", []byte("# Menu")); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+
+	got, err := markdownStorageFile(storage, "diary/menu.md", 2)
+	if err != nil {
+		t.Fatalf("markdownStorageFile returned an error: %v", err)
+	}
+	if !strings.Contains(string(got), "<h3>Menu</h3>") {
+		t.Errorf("storage markdown heading offset is missing: %s", got)
 	}
 }
