@@ -49,7 +49,6 @@ func LoadConfig(confFile string) (*Config, error) {
 
 	// default
 	config.Title = "Kukiki-"
-	config.TemplateDir = "static"
 	config.Default.Template = "template.html"
 
 	_, err := toml.DecodeFile(confFile, &config)

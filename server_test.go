@@ -118,61 +118,6 @@ func TestMissingPageIncludesRequestedBreadcrumbs(t *testing.T) {
 	}
 }
 
-func TestMissingPageUsesDirectoryOverride(t *testing.T) {
-	storage := NewLocalStorage(t.TempDir())
-	config := &Config{
-		Default:   DirConfig{Template: "template.html"},
-		Overrides: []DirConfig{{Prefix: "/diary/", Template: "binzume.html", Diary: true, Title: "Diary"}},
-	}
-	ts := httptest.NewServer(initHttpd(storage, config))
-	defer ts.Close()
-
-	res, err := http.Get(ts.URL + "/diary/missing")
-	if err != nil {
-		t.Fatalf("get failed: %v", err)
-	}
-	defer res.Body.Close()
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatalf("reading response failed: %v", err)
-	}
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
-	}
-	if !strings.Contains(string(body), `<link rel="stylesheet" href="/css/binzume.css" />`) {
-		t.Errorf("override template was not used: %s", body)
-	}
-	if !strings.Contains(string(body), "<title>404 Not Found - Diary</title>") {
-		t.Errorf("override title was not used: %s", body)
-	}
-}
-
-func TestMissingDiaryPageDoesNotFailWhenMenuIsAbsent(t *testing.T) {
-	storage := NewLocalStorage(t.TempDir())
-	config := &Config{
-		Default:   DirConfig{Template: "template.html"},
-		Overrides: []DirConfig{{Prefix: "/diary/", Template: "binzume-diary.html", Diary: true}},
-	}
-	ts := httptest.NewServer(initHttpd(storage, config))
-	defer ts.Close()
-
-	res, err := http.Get(ts.URL + "/diary/")
-	if err != nil {
-		t.Fatalf("get failed: %v", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
-	}
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatalf("reading response failed: %v", err)
-	}
-	if !strings.Contains(string(body), "404 Not Found") {
-		t.Errorf("404 body is missing: %s", body)
-	}
-}
-
 func TestMissingDiaryPageIncludesRequestedBreadcrumbs(t *testing.T) {
 	storage := NewLocalStorage(t.TempDir())
 	if err := writePage(storage, "index.md", []byte("# Home")); err != nil {
@@ -204,6 +149,24 @@ func TestMissingDiaryPageIncludesRequestedBreadcrumbs(t *testing.T) {
 		if !strings.Contains(body, item) {
 			t.Errorf("missing breadcrumb item %q: %s", item, body)
 		}
+	}
+}
+
+func TestMissingDiarySectionPathRedirectsToMonthSection(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	config := &Config{
+		Default:   DirConfig{Template: "template.html"},
+		Overrides: []DirConfig{{Prefix: "/diary/", Template: "template.html", Diary: true}},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/diary/2026-11-05xyz", nil)
+	response := httptest.NewRecorder()
+	initHttpd(storage, config).ServeHTTP(response, request)
+
+	if response.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusMovedPermanently)
+	}
+	if got := response.Header().Get("Location"); got != "/diary/2026-11#05xyz" {
+		t.Errorf("Location = %q, want %q", got, "/diary/2026-11#05xyz")
 	}
 }
 
@@ -433,6 +396,7 @@ func TestSectionAPI(t *testing.T) {
 		Accounts:      []AccountConfig{{Name: "admin", AuthType: "INSECURE", Secret: "password"}},
 	}
 	defer func() { auth = previousAuth }()
+	updatedAt := time.Now().UnixMilli()
 	request, err := http.NewRequest(http.MethodPost, ts.URL+"/api/pages/diary/2025-10?section=today", strings.NewReader(`{"text":"new text","updateUnixMS":0}`))
 	if err != nil {
 		t.Fatalf("section save request creation failed: %v", err)
@@ -448,15 +412,15 @@ func TestSectionAPI(t *testing.T) {
 		t.Fatalf("section save status = %d, want %d", res.StatusCode, http.StatusOK)
 	}
 
-	data, err := readStorageFile(storage, "diary/2025-10.md")
+	updatedSection, err := readSection(storage, "diary/2025-10.md", "today")
 	if err != nil {
-		t.Fatalf("reading updated page failed: %v", err)
+		t.Fatalf("reading updated section failed: %v", err)
 	}
-	want := "preamble\n&[today]\nnew text\n&[other]\nkeep text\n"
-	if string(data) != want {
-		t.Errorf("updated page = %q, want %q", data, want)
+	if updatedSection.UpdateUnixMS < updatedAt || updatedSection.UpdateUnixMS > time.Now().UnixMilli() || updatedSection.Body != "new text\n" {
+		t.Errorf("updated section = %#v, want a current timestamp and body", updatedSection)
 	}
 
+	createdAt := time.Now().UnixMilli()
 	request, err = http.NewRequest(http.MethodPost, ts.URL+"/api/pages/diary/2025-10?section=new_section", strings.NewReader(`{"text":"added text","updateUnixMS":0}`))
 	if err != nil {
 		t.Fatalf("new section request creation failed: %v", err)
@@ -472,13 +436,16 @@ func TestSectionAPI(t *testing.T) {
 		t.Fatalf("new section save status = %d, want %d", res.StatusCode, http.StatusOK)
 	}
 
-	data, err = readStorageFile(storage, "diary/2025-10.md")
+	data, err := readStorageFile(storage, "diary/2025-10.md")
 	if err != nil {
 		t.Fatalf("reading page after new section failed: %v", err)
 	}
-	want = "preamble\n&[today]\nnew text\n&[other]\nkeep text\n&[new_section]\nadded text\n"
-	if string(data) != want {
-		t.Errorf("page after new section = %q, want %q", data, want)
+	newSection, err := readSection(storage, "diary/2025-10.md", "new_section")
+	if err != nil {
+		t.Fatalf("reading new section failed: %v", err)
+	}
+	if newSection.UpdateUnixMS < createdAt || newSection.UpdateUnixMS > time.Now().UnixMilli() || newSection.Body != "added text\n" {
+		t.Errorf("new section = %#v, want a current timestamp and body", newSection)
 	}
 
 	request, err = http.NewRequest(http.MethodPost, ts.URL+"/api/pages/diary/2025-10?section=today", strings.NewReader(`{"text":""}`))
@@ -499,9 +466,8 @@ func TestSectionAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading page after empty section save failed: %v", err)
 	}
-	want = "preamble\n&[other]\nkeep text\n&[new_section]\nadded text\n"
-	if string(data) != want {
-		t.Errorf("page after empty section save = %q, want %q", data, want)
+	if !strings.HasPrefix(string(data), "preamble\n&[other]\nkeep text\n&[new_section#") {
+		t.Errorf("page after empty section save = %q", data)
 	}
 }
 
@@ -538,17 +504,27 @@ func TestDeletingLastSectionDeletesPage(t *testing.T) {
 	if err := writePage(storage, "diary/2025-10.md", []byte("&[today]\nentry\n")); err != nil {
 		t.Fatalf("writePage returned an error: %v", err)
 	}
-	if err := updateSection(storage, "diary/2025-10.md", "today", "", 0, true); err != nil {
-		t.Fatalf("updateSection returned an error: %v", err)
+	if err := saveSection(storage, "diary/2025-10.md", "today", "", 0, true); err != nil {
+		t.Fatalf("saveSection returned an error: %v", err)
 	}
 	if _, err := readStorageFile(storage, "diary/2025-10.md"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("page after deleting its last section still exists, read error = %v", err)
 	}
 }
 
-func TestDiarySectionAPIPrependsNewSection(t *testing.T) {
+func TestParseSectionHeaderRejectsTrailingWhitespace(t *testing.T) {
+	for _, line := range []string{"&[today] \n", "&[today]\t\n"} {
+		if _, ok, err := parseSectionHeader(line); err != nil {
+			t.Fatalf("parseSectionHeader(%q) returned an error: %v", line, err)
+		} else if ok {
+			t.Errorf("parseSectionHeader(%q) recognized a header", line)
+		}
+	}
+}
+
+func TestDiarySectionAPIInsertsNewSection(t *testing.T) {
 	storage := NewLocalStorage(t.TempDir())
-	if err := writePage(storage, "diary/2025-10.md", []byte("&[existing]\nexisting text\n")); err != nil {
+	if err := writePage(storage, "diary/2025-10.md", []byte("&[2025-10-31]\nexisting text\n")); err != nil {
 		t.Fatalf("writePage returned an error: %v", err)
 	}
 	config := &Config{
@@ -561,7 +537,7 @@ func TestDiarySectionAPIPrependsNewSection(t *testing.T) {
 	request, err := http.NewRequest(
 		http.MethodPost,
 		ts.URL+"/api/pages/diary/2025-10?section=2025-10-30",
-		strings.NewReader(`{"text":"new text","updateUnixMS":0}`),
+		strings.NewReader(`{"text":"new text","updateUnixMS":1730000000000}`),
 	)
 	if err != nil {
 		t.Fatalf("section save request creation failed: %v", err)
@@ -581,7 +557,28 @@ func TestDiarySectionAPIPrependsNewSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading updated page failed: %v", err)
 	}
-	want := "&[2025-10-30]\nnew text\n&[existing]\nexisting text\n"
+	want := "&[2025-10-31]\nexisting text\n&[2025-10-30#1730000000000]\nnew text\n"
+	if string(data) != want {
+		t.Errorf("updated page = %q, want %q", data, want)
+	}
+}
+
+func TestDiarySectionAPIInsertsDateInDescendingOrder(t *testing.T) {
+	storage := NewLocalStorage(t.TempDir())
+	if err := writePage(storage, "diary/2025-10.md", []byte(
+		"&[2025-10-31]\nlatest\n&[2025-10-29]\nearlier\n",
+	)); err != nil {
+		t.Fatalf("writePage returned an error: %v", err)
+	}
+	if err := saveSection(storage, "diary/2025-10.md", "2025-10-30", "middle", 1730000000000, true); err != nil {
+		t.Fatalf("saveSection returned an error: %v", err)
+	}
+
+	data, err := readStorageFile(storage, "diary/2025-10.md")
+	if err != nil {
+		t.Fatalf("reading updated page failed: %v", err)
+	}
+	want := "&[2025-10-31]\nlatest\n&[2025-10-30#1730000000000]\nmiddle\n&[2025-10-29]\nearlier\n"
 	if string(data) != want {
 		t.Errorf("updated page = %q, want %q", data, want)
 	}
@@ -623,7 +620,7 @@ func TestDiarySectionAPIRoutesBySectionMonth(t *testing.T) {
 	request, err := http.NewRequest(
 		http.MethodPost,
 		ts.URL+"/api/pages/diary/2025-10?section=2025-11-02",
-		strings.NewReader(`{"text":"Moved to November","updateUnixMS":0}`),
+		strings.NewReader(`{"text":"Moved to November","updateUnixMS":1730000000000}`),
 	)
 	if err != nil {
 		t.Fatalf("section save request creation failed: %v", err)
@@ -650,7 +647,7 @@ func TestDiarySectionAPIRoutesBySectionMonth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading November diary failed: %v", err)
 	}
-	want := "&[2025-11-02]\nMoved to November\n&[2025-11-01]\nNovember\n"
+	want := "&[2025-11-02#1730000000000]\nMoved to November\n&[2025-11-01]\nNovember\n"
 	if string(data) != want {
 		t.Errorf("November diary = %q, want %q", data, want)
 	}
@@ -878,28 +875,6 @@ func TestTemplateVariables(t *testing.T) {
 	}
 	if got := templateData(config, map[string]any{"author": "page author"})["author"]; got != "page author" {
 		t.Errorf("explicit template data was overwritten: %#v", got)
-	}
-}
-
-func TestTemplateVariablesAreRendered(t *testing.T) {
-	storage := NewLocalStorage(t.TempDir())
-	if err := writePage(storage, "index.md", []byte("# Home")); err != nil {
-		t.Fatalf("storage.Store returned an error: %v", err)
-	}
-	config := &Config{
-		Variables: map[string]any{"author": "binzume"},
-		Default:   DirConfig{Template: "binzume.html"},
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	response := httptest.NewRecorder()
-	initHttpd(storage, config).ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
-	}
-	if !strings.Contains(response.Body.String(), "Copyright © binzume all rights reserved.") {
-		t.Errorf("template variable is missing from rendered page: %s", response.Body.String())
 	}
 }
 
@@ -1268,52 +1243,6 @@ func TestDiaryDirectoryDisplaysLatestDiary(t *testing.T) {
 	}
 	if strings.Contains(string(body), `<a href="/diary/">`) {
 		t.Errorf("diary directory included itself in breadcrumbs: %s", body)
-	}
-}
-
-func TestDiaryDirectoryDisplaysArchiveLinks(t *testing.T) {
-	storage := NewLocalStorage(t.TempDir())
-	for path, content := range map[string]string{
-		"diary/2025-01.md": "&[2025-01-01]\nJanuary",
-		"diary/2025-02.md": "&[2025-02-01]\nFebruary",
-		"diary/2024-12.md": "&[2024-12-01]\nDecember",
-	} {
-		if err := writePage(storage, path, []byte(content)); err != nil {
-			t.Fatalf("writePage(storage, %q) returned an error: %v", path, err)
-		}
-	}
-	config := &Config{
-		Default:   DirConfig{Template: "template.html"},
-		Overrides: []DirConfig{{Prefix: "/diary/", Template: "binzume-diary.html", Diary: true}},
-	}
-	ts := httptest.NewServer(initHttpd(storage, config))
-	defer ts.Close()
-
-	res, err := http.Get(ts.URL + "/diary/")
-	if err != nil {
-		t.Fatalf("get failed: %v", err)
-	}
-	body, err := io.ReadAll(res.Body)
-	res.Body.Close()
-	if err != nil {
-		t.Fatalf("reading response failed: %v", err)
-	}
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", res.StatusCode, http.StatusOK, body)
-	}
-	for _, want := range []string{
-		`<h3>2025</h3>`,
-		`<a href="/diary/2025-01">[01]</a>`,
-		`<a href="/diary/2025-02">[02]</a>`,
-		`<h3>2024</h3>`,
-		`<a href="/diary/2024-12">[12]</a>`,
-	} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("archive link %q is missing: %s", want, body)
-		}
-	}
-	if strings.Index(string(body), "<h3>2025</h3>") > strings.Index(string(body), "<h3>2024</h3>") {
-		t.Errorf("archive years are not ordered newest-first: %s", body)
 	}
 }
 

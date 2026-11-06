@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var sectionHeaderPattern = regexp.MustCompile(`^&\[([A-Za-z0-9_.-]+)(?:#([0-9]+))?\][ \t]*$`)
+var sectionHeaderPattern = regexp.MustCompile(`^&\[([A-Za-z0-9_.-]+)(?:#([0-9]+))?\]$`)
 
 var (
 	ErrSectionNotFound = errors.New("section not found")
@@ -114,7 +114,7 @@ func scanSection(reader io.Reader, name string) (Section, error) {
 	return section, nil
 }
 
-func updateSection(storage fs.FS, path, name, body string, updateUnixMS int64, prepend bool) error {
+func saveSection(storage fs.FS, path, name, body string, updateUnixMS int64, insertInOrder bool) error {
 	if !validSectionName(name) {
 		return fmt.Errorf("invalid section name: %q", name)
 	}
@@ -132,6 +132,9 @@ func updateSection(storage fs.FS, path, name, body string, updateUnixMS int64, p
 	}
 	if body == "" {
 		return deleteSection(writable, storageName, name)
+	}
+	if updateUnixMS == 0 {
+		updateUnixMS = time.Now().UnixMilli()
 	}
 	temporaryName, temporary, err := openTemporaryWriter(writable, storageName)
 	if err != nil {
@@ -152,61 +155,10 @@ func updateSection(storage fs.FS, path, name, body string, updateUnixMS int64, p
 			_ = temporary.Close()
 			return err
 		}
-		rewriteErr = writeNewSection(temporary, name, body, updateUnixMS)
+		rewriteErr = writeSectionBlock(temporary, name, body, updateUnixMS)
 	} else {
-		rewriteErr = rewriteSection(source, temporary, name, body, updateUnixMS)
+		rewriteErr = rewriteOrInsertSection(temporary, source, name, body, updateUnixMS, insertInOrder)
 		sourceErr = source.Close()
-	}
-	if errors.Is(rewriteErr, ErrSectionNotFound) {
-		// rewriteSection has copied the original file to the temporary file.
-		if prepend {
-			if err := temporary.Close(); err != nil {
-				return err
-			}
-
-			// The section was missing, so create another temporary file with
-			// the new section before the already-copied original contents.
-			prependedName, prepended, err := openTemporaryWriter(writable, storageName)
-			if err != nil {
-				return err
-			}
-			removePrepended := true
-			defer func() {
-				if removePrepended {
-					_ = writable.Remove(prependedName)
-				}
-			}()
-
-			prependErr := writeNewSection(prepended, name, body, updateUnixMS)
-			copied, copyErr := writable.Open(temporaryName)
-			if copyErr == nil {
-				_, copyErr = io.Copy(prepended, copied)
-				closeErr := copied.Close()
-				if copyErr == nil {
-					copyErr = closeErr
-				}
-			}
-			closeErr := prepended.Close()
-			if prependErr != nil {
-				return prependErr
-			}
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-			if err := writable.Remove(temporaryName); err != nil {
-				return err
-			}
-			if err := writable.Rename(prependedName, storageName); err != nil {
-				return err
-			}
-			removePrepended = false
-			removeTemporary = false
-			return nil
-		}
-		rewriteErr = writeNewSection(temporary, name, body, updateUnixMS)
 	}
 	temporaryErr := temporary.Close()
 	if rewriteErr != nil {
@@ -246,7 +198,7 @@ func deleteSection(storage WritableFS, storageName, name string) error {
 		}
 	}()
 
-	rewriteErr := rewriteSection(source, temporary, name, "", 0)
+	rewriteErr := removeSectionFromStream(source, temporary, name)
 	sourceErr := source.Close()
 	temporaryErr := temporary.Close()
 	if rewriteErr != nil && !errors.Is(rewriteErr, ErrSectionNotFound) {
@@ -280,11 +232,62 @@ func deleteSection(storage WritableFS, storageName, name string) error {
 	return nil
 }
 
-func writeNewSection(destination io.Writer, name, body string, updateUnixMS int64) error {
+func writeSectionBlock(destination io.Writer, name, body string, updateUnixMS int64) error {
 	if _, err := io.WriteString(destination, formatSectionHeader(name, updateUnixMS)); err != nil {
 		return err
 	}
 	return writeSectionBody(destination, body)
+}
+
+// rewriteOrInsertSection replaces a matching section, or inserts a new one
+// when it is absent. Diary sections are assumed to already be sorted by name
+// in descending order.
+func rewriteOrInsertSection(destination io.Writer, source io.Reader, name, body string, updateUnixMS int64, insertInOrder bool) error {
+	scanner := bufio.NewScanner(source)
+	found := false
+	replacing := false
+	inserted := false
+
+	for scanner.Scan() {
+		line := scanner.Text() + "\n"
+		candidate, isHeader, err := parseSectionHeader(line)
+		if err != nil {
+			return err
+		}
+		if isHeader {
+			if replacing {
+				replacing = false
+			}
+			if candidate.Name == name {
+				if body != "" {
+					if err := writeSectionBlock(destination, name, body, updateUnixMS); err != nil {
+						return err
+					}
+				}
+				found = true
+				replacing = true
+				continue
+			}
+			if !found && !inserted && insertInOrder && candidate.Name < name {
+				if err := writeSectionBlock(destination, name, body, updateUnixMS); err != nil {
+					return err
+				}
+				inserted = true
+			}
+		}
+		if !replacing {
+			if _, err := io.WriteString(destination, line); err != nil {
+				return err
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if !found && !inserted {
+		return writeSectionBlock(destination, name, body, updateUnixMS)
+	}
+	return nil
 }
 
 func writeSectionBody(destination io.Writer, body string) error {
@@ -317,10 +320,10 @@ func openTemporaryWriter(storage WritableFS, original string) (string, io.WriteC
 	return "", nil, fmt.Errorf("failed to create temporary section file")
 }
 
-func rewriteSection(source io.Reader, destination io.Writer, name, body string, updateUnixMS int64) error {
+func removeSectionFromStream(source io.Reader, destination io.Writer, name string) error {
 	scanner := bufio.NewScanner(source)
 	found := false
-	replacing := false
+	removing := false
 
 	for scanner.Scan() {
 		line := scanner.Text() + "\n"
@@ -330,25 +333,15 @@ func rewriteSection(source io.Reader, destination io.Writer, name, body string, 
 		}
 
 		if isHeader {
-			if replacing {
-				if err := writeSectionBody(destination, body); err != nil {
-					return err
-				}
-				replacing = false
-			}
+			removing = false
 			if candidate.Name == name {
-				if body != "" {
-					if _, err := io.WriteString(destination, formatSectionHeader(name, updateUnixMS)); err != nil {
-						return err
-					}
-				}
 				found = true
-				replacing = true
+				removing = true
 				continue
 			}
 		}
 
-		if !replacing {
+		if !removing {
 			if _, err := io.WriteString(destination, line); err != nil {
 				return err
 			}
@@ -356,11 +349,6 @@ func rewriteSection(source io.Reader, destination io.Writer, name, body string, 
 	}
 	if err := scanner.Err(); err != nil {
 		return err
-	}
-	if replacing {
-		if err := writeSectionBody(destination, body); err != nil {
-			return err
-		}
 	}
 	if !found {
 		return ErrSectionNotFound
