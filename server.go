@@ -221,6 +221,16 @@ func renderMarkdownReaderWithHeadingOffset(reader io.Reader, out io.Writer, sect
 			}
 		}
 
+		if segment.section != 0 && !inCodeFence && strings.HasPrefix(line, "// ") {
+			// Keep the line break so a comment does not join the surrounding
+			// Markdown lines into a different paragraph.
+			if _, err := io.WriteString(segment.input, "\n"); err != nil {
+				_ = segment.close()
+				return err
+			}
+			continue
+		}
+
 		if _, err := io.WriteString(segment.input, line+"\n"); err != nil {
 			_ = segment.close()
 			return err

@@ -799,6 +799,16 @@ func TestLoadConfigSiteTitle(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMissingFileUsesDefaults(t *testing.T) {
+	config, err := LoadConfig(filepath.Join(t.TempDir(), "kukiki.toml"))
+	if err != nil {
+		t.Fatalf("LoadConfig returned an error: %v", err)
+	}
+	if config.Title != "Kukiki-" || config.Default.Template != "template.html" {
+		t.Fatalf("default config = %#v", config)
+	}
+}
+
 func TestConfigTemplateDir(t *testing.T) {
 	config := &Config{}
 	if got := config.templateDir(); got != "static" {
@@ -1348,6 +1358,25 @@ func TestRenderMarkdownSectionsFromParserReader(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered sections are missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestRenderMarkdownCommentsOnlyInsideSections(t *testing.T) {
+	var output bytes.Buffer
+	input := "outside\n// outside comment\n\n&[today]\n\nvisible\n// hidden comment\nnext\n\n```\n// code comment\n```\n"
+	if err := renderMarkdownReader(strings.NewReader(input), &output, nil, false); err != nil {
+		t.Fatalf("renderMarkdownReader returned an error: %v", err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, "// outside comment") {
+		t.Errorf("comment outside a section was removed: %s", got)
+	}
+	if strings.Contains(got, "// hidden comment") {
+		t.Errorf("comment inside a section was rendered: %s", got)
+	}
+	if !strings.Contains(got, "// code comment") {
+		t.Errorf("comment inside a code fence was removed: %s", got)
 	}
 }
 

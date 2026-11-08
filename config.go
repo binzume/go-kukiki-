@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"os"
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
@@ -45,16 +47,19 @@ func (c *Config) siteTitle(dirConfig DirConfig) string {
 
 // LoadConfig
 func LoadConfig(confFile string) (*Config, error) {
-	var config Config
-
-	// default
-	config.Title = "Kukiki-"
-	config.Default.Template = "template.html"
+	config := Config{
+		Title: "Kukiki-",
+		Default: DirConfig{
+			Template: "template.html",
+		},
+	}
 
 	_, err := toml.DecodeFile(confFile, &config)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			log.Printf("config file %q was not found; using default values", confFile)
+		}
+		return &config, nil
 	}
 	return &config, nil
-
 }

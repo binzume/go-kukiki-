@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ func LoadAuthConfig(fname string) (*AuthConfig, error) {
 	var c AuthConfig
 	_, err := toml.DecodeFile(fname, &c)
 	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("auth config file %q was not found; using empty auth config", fname)
+			return &AuthConfig{}, nil
+		}
 		return &AuthConfig{}, err
 	}
 	return &c, err
