@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -28,6 +29,57 @@ import (
 var pagePrefixBlacklist = []string{"/api/", "static", "/css/", "/js/"}
 
 const SessionCookieName = "KUKIKI_SESSION"
+
+// These extensions are blocked by default because files with them can be
+// interpreted as active content by browsers or server-side handlers. An
+// explicit configuration entry can allow a specific extension when the
+// deployment requires it.
+var unsafeUploadExtensions = map[string]struct{}{
+	".html":  {},
+	".htm":   {},
+	".xhtml": {},
+	".shtml": {},
+	".svg":   {},
+	".svgz":  {},
+	".js":    {},
+	".mjs":   {},
+	".cjs":   {},
+	".jsx":   {},
+	".tsx":   {},
+	".css":   {},
+	".xsl":   {},
+	".xslt":  {},
+	".php":   {},
+	".phtml": {},
+	".phar":  {},
+	".asp":   {},
+	".aspx":  {},
+	".jsp":   {},
+	".jspx":  {},
+	".cgi":   {},
+	".pl":    {},
+	".py":    {},
+	".rb":    {},
+	".sh":    {},
+	".bash":  {},
+	".bat":   {},
+	".cmd":   {},
+	".ps1":   {},
+	".vbs":   {},
+	".wsf":   {},
+	".jar":   {},
+	".exe":   {},
+	".dll":   {},
+}
+
+func uploadExtensionAllowed(config *Config, name string) bool {
+	base := strings.TrimRight(filepath.Base(name), ". ")
+	extension := strings.ToLower(filepath.Ext(base))
+	if _, unsafe := unsafeUploadExtensions[extension]; !unsafe {
+		return true
+	}
+	return config != nil && config.AllowUnsafeUploadExtensions
+}
 
 // https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
 func applyPosixTZ() {
@@ -852,6 +904,17 @@ func isLoggedIn(r *http.Request) bool {
 	return err == nil
 }
 
+// requestIsHTTPS recognizes direct TLS and the HTTPS scheme forwarded by a
+// trusted reverse proxy. X-Forwarded-Proto must only be accepted when the
+// application is reachable through a proxy that overwrites this header.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	forwardedProto := strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-Proto"), ",", 2)[0])
+	return strings.EqualFold(forwardedProto, "https")
+}
+
 func authHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth == nil || auth.SessionSecret == "" {
@@ -890,7 +953,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		Name:     SessionCookieName,
 		Value:    auth.CreateSessionString(a),
 		MaxAge:   int(auth.sessionTTLSeconds()),
-		Secure:   r.TLS != nil,
+		Secure:   requestIsHTTPS(r),
 		HttpOnly: true,
 		Path:     "/",
 	}
@@ -908,7 +971,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 		Name:     SessionCookieName,
 		Value:    "",
 		MaxAge:   -1,
-		Secure:   r.TLS != nil,
+		Secure:   requestIsHTTPS(r),
 		HttpOnly: true,
 		Path:     "/",
 	})
@@ -1083,6 +1146,10 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 		name, err := normalizeFSPath(r.PathValue("path"))
 		if err != nil || isBlockedPage(name) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad file path"})
+			return
+		}
+		if !uploadExtensionAllowed(config, name) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "unsafe file extension is not allowed"})
 			return
 		}
 		if r.ContentLength > maxUploadSize {

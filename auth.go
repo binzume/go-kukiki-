@@ -15,7 +15,11 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const DefaultSessionTTL = 86400 * 365
+const (
+	DefaultSessionTTL   = 86400 * 90
+	sessionSecretEnv    = "KUKIKI_SESSION_SECRET"
+	sessionSecretLength = 32
+)
 
 type AccountConfig struct {
 	Name     string `yaml:"name"`
@@ -26,7 +30,7 @@ type AccountConfig struct {
 type AuthConfig struct {
 	Accounts      []AccountConfig `toml:"accounts" yaml:"accounts"`
 	GuestAccount  string          `yaml:"guest_account"`
-	SessionSecret string          `yaml:"session_secret"`
+	SessionSecret string          `toml:"-" yaml:"-"`
 	SessionTTL    int             `yaml:"sessionTTL"`
 }
 
@@ -36,11 +40,17 @@ func LoadAuthConfig(fname string) (*AuthConfig, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Printf("auth config file %q was not found; using empty auth config", fname)
-			return &AuthConfig{}, nil
+		} else {
+			return &AuthConfig{}, err
 		}
-		return &AuthConfig{}, err
 	}
-	return &c, err
+
+	secret := os.Getenv(sessionSecretEnv)
+	if secret == "" {
+		secret = string(genRandom(sessionSecretLength))
+	}
+	c.SessionSecret = secret
+	return &c, nil
 }
 
 func (c *AuthConfig) VerifyPassword(user, password string) (*AccountConfig, error) {

@@ -347,6 +347,22 @@ func TestFileAPI(t *testing.T) {
 		t.Fatal("markdown file still exists after deletion")
 	}
 
+	response = do(http.MethodPut, "/api/files/docs/page.html", bytes.NewReader([]byte("<script>alert(1)</script>")))
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unsafe extension upload status = %d, want %d", response.StatusCode, http.StatusBadRequest)
+	}
+	response.Body.Close()
+	if existsFile(storage, "docs/page.html") {
+		t.Fatal("unsafe extension upload created a file")
+	}
+
+	config.AllowUnsafeUploadExtensions = true
+	response = do(http.MethodPut, "/api/files/docs/page.html", bytes.NewReader([]byte("<script>alert(1)</script>")))
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("explicitly allowed unsafe extension upload status = %d, want %d", response.StatusCode, http.StatusCreated)
+	}
+	response.Body.Close()
+
 	response = do(http.MethodDelete, "/api/files/docs/image.bin", nil)
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("file deletion status = %d, want %d", response.StatusCode, http.StatusNoContent)
@@ -799,6 +815,21 @@ func TestLoadConfigSiteTitle(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAllowUnsafeUploadExtensions(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "kukiki.toml")
+	if err := os.WriteFile(configPath, []byte("allowUnsafeUploadExtensions = true\n"), 0644); err != nil {
+		t.Fatalf("os.WriteFile returned an error: %v", err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned an error: %v", err)
+	}
+	if !config.AllowUnsafeUploadExtensions {
+		t.Error("allow unsafe upload extensions = false, want true")
+	}
+}
+
 func TestLoadConfigMissingFileUsesDefaults(t *testing.T) {
 	config, err := LoadConfig(filepath.Join(t.TempDir(), "kukiki.toml"))
 	if err != nil {
@@ -1129,6 +1160,29 @@ func TestLogoutClearsSessionAndRedirects(t *testing.T) {
 	}
 	if cookie := cookies[0]; cookie.Name != SessionCookieName || cookie.MaxAge >= 0 || cookie.Path != "/" {
 		t.Errorf("logout cookie = %#v, want expired %s cookie at /", cookie, SessionCookieName)
+	}
+}
+
+func TestLoginCookieIsSecureBehindHTTPSReverseProxy(t *testing.T) {
+	previousAuth := auth
+	auth = &AuthConfig{
+		SessionSecret: "test-session-secret",
+		Accounts:      []AccountConfig{{Name: "admin", AuthType: "INSECURE", Secret: "password"}},
+	}
+	defer func() { auth = previousAuth }()
+
+	request := httptest.NewRequest(http.MethodPost, "/login.html", strings.NewReader("user=admin&password=password"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("X-Forwarded-Proto", "https")
+	response := httptest.NewRecorder()
+	loginHandler(response, request)
+
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("login set %d cookies, want 1", len(cookies))
+	}
+	if !cookies[0].Secure {
+		t.Errorf("login cookie Secure = false, want true behind HTTPS reverse proxy")
 	}
 }
 

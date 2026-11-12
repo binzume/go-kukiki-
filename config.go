@@ -11,11 +11,12 @@ import (
 // Config
 type Config struct {
 	// Title is the site-wide title.
-	Title       string
-	TemplateDir string
-	Variables   map[string]any
-	Default     DirConfig
-	Overrides   []DirConfig
+	Title                       string
+	TemplateDir                 string
+	Variables                   map[string]any
+	Default                     DirConfig
+	Overrides                   []DirConfig
+	AllowUnsafeUploadExtensions bool `toml:"allowUnsafeUploadExtensions"`
 }
 
 func (c *Config) templateDir() string {

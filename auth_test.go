@@ -1,18 +1,36 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestLoadAuthConfigMissingFileUsesEmptyConfig(t *testing.T) {
+func TestLoadAuthConfigReadsSessionSecretFromEnvironment(t *testing.T) {
+	t.Setenv(sessionSecretEnv, "environment-session-secret")
 	config, err := LoadAuthConfig(filepath.Join(t.TempDir(), "auth.toml"))
 	if err != nil {
 		t.Fatalf("LoadAuthConfig returned an error: %v", err)
 	}
-	if config == nil || len(config.Accounts) != 0 || config.SessionSecret != "" {
-		t.Fatalf("empty auth config = %#v", config)
+	if config == nil || len(config.Accounts) != 0 || config.SessionSecret != "environment-session-secret" {
+		t.Fatalf("auth config = %#v; want the environment session secret", config)
+	}
+}
+
+func TestLoadAuthConfigGeneratesSessionSecretWhenEnvironmentIsUnset(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "auth.toml")
+	if err := os.WriteFile(configPath, []byte("sessionTTL = 60\n"), 0600); err != nil {
+		t.Fatalf("write auth config: %v", err)
+	}
+
+	t.Setenv(sessionSecretEnv, "")
+	config, err := LoadAuthConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadAuthConfig returned an error: %v", err)
+	}
+	if config == nil || len(config.SessionSecret) != sessionSecretLength {
+		t.Fatalf("generated session secret = %#v; want %d characters", config, sessionSecretLength)
 	}
 }
 
