@@ -4,3 +4,7 @@ github.com/binzume/go-calendar v0.0.0-20171112181104-54c73fb38c74 h1:eVAnn6tieTN
 github.com/binzume/go-calendar v0.0.0-20171112181104-54c73fb38c74/go.mod h1:Z8xgX87HSEBeb6R+OKFircuQc70epgz29rPWEdy2pQY=
 github.com/binzume/go-markdown v0.0.0-20261101092008-f41bc5a03146 h1:3v/cTdzCw85QvpYwzmZDxt1eOsV7ka0VhKg/oVRpMQ4=
 github.com/binzume/go-markdown v0.0.0-20261101092008-f41bc5a03146/go.mod h1:MI1ia45F3FLQu154PbferPqm+BXOWShcvAIT1lpwyFs=
+github.com/binzume/go-markdown v0.0.0-20261113004824-b5e4c1f07267 h1:CUZPM2b/p4g9UnlA/xczPrd5yisPVwFKFATJksgQHJY=
+github.com/binzume/go-markdown v0.0.0-20261113004824-b5e4c1f07267/go.mod h1:MI1ia45F3FLQu154PbferPqm+BXOWShcvAIT1lpwyFs=
+github.com/binzume/go-markdown v0.0.0-20261113094210-e1bfade75067 h1:QpxKykQMwjVOj7IKhkbtLQyHs1RxEAhBtA3p7wgE160=
+github.com/binzume/go-markdown v0.0.0-20261113094210-e1bfade75067/go.mod h1:MI1ia45F3FLQu154PbferPqm+BXOWShcvAIT1lpwyFs=

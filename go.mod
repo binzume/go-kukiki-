@@ -7,5 +7,5 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/binzume/go-calendar v0.0.0-20171112181104-54c73fb38c74
-	github.com/binzume/go-markdown v0.0.0-20261101092008-f41bc5a03146
+	github.com/binzume/go-markdown v0.0.0-20261113094210-e1bfade75067
 )
