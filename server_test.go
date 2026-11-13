@@ -389,21 +389,18 @@ func TestSectionAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("section get failed: %v", err)
 	}
-	var got struct {
-		Section      string `json:"section"`
-		UpdateUnixMS int64  `json:"updateUnixMS"`
-		Text         string `json:"text"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+	got, err := io.ReadAll(res.Body)
+	if err != nil {
 		res.Body.Close()
-		t.Fatalf("decoding section response failed: %v", err)
+		t.Fatalf("reading section response failed: %v", err)
 	}
+	updateUnixMS := res.Header.Get("X-Update-Unix-Ms")
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("section get status = %d, want %d", res.StatusCode, http.StatusOK)
 	}
-	if got.Section != "today" || got.UpdateUnixMS != 1730000000000 || got.Text != "old text\n\n" {
-		t.Errorf("section response = %#v", got)
+	if updateUnixMS != "1730000000000" || string(got) != "old text\n\n" {
+		t.Errorf("section response = (%q, %q)", updateUnixMS, got)
 	}
 
 	previousAuth := auth
@@ -619,17 +616,15 @@ func TestDiarySectionAPIRoutesBySectionMonth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("section get failed: %v", err)
 	}
-	var got struct {
-		Section string `json:"section"`
-		Text    string `json:"text"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+	got, err := io.ReadAll(res.Body)
+	if err != nil {
 		res.Body.Close()
-		t.Fatalf("decoding section response failed: %v", err)
+		t.Fatalf("reading section response failed: %v", err)
 	}
+	updateUnixMS := res.Header.Get("X-Update-Unix-Ms")
 	res.Body.Close()
-	if res.StatusCode != http.StatusOK || got.Section != "2025-11-01" || got.Text != "November\n" {
-		t.Fatalf("section get = (%d, %#v), want (%d, section from November)", res.StatusCode, got, http.StatusOK)
+	if res.StatusCode != http.StatusOK || updateUnixMS != "0" || string(got) != "November\n" {
+		t.Fatalf("section get = (%d, %q, %q), want (%d, 0, section from November)", res.StatusCode, updateUnixMS, got, http.StatusOK)
 	}
 
 	cookie := enableTestAuth(t)

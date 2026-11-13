@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -26,60 +24,7 @@ import (
 	"github.com/binzume/go-markdown"
 )
 
-var pagePrefixBlacklist = []string{"/api/", "static", "/css/", "/js/"}
-
 const SessionCookieName = "KUKIKI_SESSION"
-
-// These extensions are blocked by default because files with them can be
-// interpreted as active content by browsers or server-side handlers. An
-// explicit configuration entry can allow a specific extension when the
-// deployment requires it.
-var unsafeUploadExtensions = map[string]struct{}{
-	".html":  {},
-	".htm":   {},
-	".xhtml": {},
-	".shtml": {},
-	".svg":   {},
-	".svgz":  {},
-	".js":    {},
-	".mjs":   {},
-	".cjs":   {},
-	".jsx":   {},
-	".tsx":   {},
-	".css":   {},
-	".xsl":   {},
-	".xslt":  {},
-	".php":   {},
-	".phtml": {},
-	".phar":  {},
-	".asp":   {},
-	".aspx":  {},
-	".jsp":   {},
-	".jspx":  {},
-	".cgi":   {},
-	".pl":    {},
-	".py":    {},
-	".rb":    {},
-	".sh":    {},
-	".bash":  {},
-	".bat":   {},
-	".cmd":   {},
-	".ps1":   {},
-	".vbs":   {},
-	".wsf":   {},
-	".jar":   {},
-	".exe":   {},
-	".dll":   {},
-}
-
-func uploadExtensionAllowed(config *Config, name string) bool {
-	base := strings.TrimRight(filepath.Base(name), ". ")
-	extension := strings.ToLower(filepath.Ext(base))
-	if _, unsafe := unsafeUploadExtensions[extension]; !unsafe {
-		return true
-	}
-	return config != nil && config.AllowUnsafeUploadExtensions
-}
 
 // https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
 func applyPosixTZ() {
@@ -106,18 +51,6 @@ func applyPosixTZ() {
 
 func init() {
 	applyPosixTZ()
-}
-
-func isBlockedPage(page string) bool {
-	page = strings.TrimPrefix(page, "/")
-	page = strings.TrimSuffix(page, ".md")
-	for _, prefix := range pagePrefixBlacklist {
-		prefix = strings.Trim(prefix, "/")
-		if page == prefix || strings.HasPrefix(page, prefix+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 type markdownLinkWriter struct {
@@ -940,7 +873,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.ParseMultipartForm(4096)
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "login.html", http.StatusFound)
+		return
+	}
 	password := r.PostForm.Get("password")
 	user := r.PostForm.Get("user")
 	a, err := auth.VerifyPassword(user, password)
@@ -956,6 +893,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		Secure:   requestIsHTTPS(r),
 		HttpOnly: true,
 		Path:     "/",
+		SameSite: http.SameSiteLaxMode,
 	}
 	http.SetCookie(w, c)
 	http.Redirect(w, r, ".", 302)
@@ -974,6 +912,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 		Secure:   requestIsHTTPS(r),
 		HttpOnly: true,
 		Path:     "/",
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -1016,52 +955,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func firstQueryValue(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
-}
-
-func writeText(w http.ResponseWriter, status int, data []byte) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = w.Write(data)
-}
-
 func setLastModified(w http.ResponseWriter, info fs.FileInfo) {
 	if info == nil || info.ModTime().IsZero() {
 		return
 	}
 	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
 }
-
-func setLastModifiedFromStorage(w http.ResponseWriter, storage fs.FS, path string) {
-	name, err := normalizeFSPath(path)
-	if err != nil {
-		return
-	}
-	info, err := fs.Stat(storage, name)
-	if err != nil {
-		return
-	}
-	setLastModified(w, info)
-}
-
-func apiPagePath(r *http.Request) string {
-	page := r.PathValue("page")
-	if page == "" {
-		return "/"
-	}
-	return page
-}
-
 func executeTemplate(w http.ResponseWriter, templates *template.Template, status int, name string, data any) {
 	var output bytes.Buffer
 	if err := templates.ExecuteTemplate(&output, name, data); err != nil {
@@ -1133,202 +1032,7 @@ func initHttpd(storage fs.FS, config *Config) http.Handler {
 	mux.HandleFunc("POST /login.html", loginHandler)
 	mux.HandleFunc("GET /logout", logoutHandler)
 
-	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "It works!"})
-	})
-
-	mux.HandleFunc("PUT /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
-		if !isLoggedIn(r) {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"_status": 401, "message": "authentication required"})
-			return
-		}
-
-		name, err := normalizeFSPath(r.PathValue("path"))
-		if err != nil || isBlockedPage(name) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad file path"})
-			return
-		}
-		if !uploadExtensionAllowed(config, name) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "unsafe file extension is not allowed"})
-			return
-		}
-		if r.ContentLength > maxUploadSize {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"_status": 413, "message": "uploaded file is too large"})
-			return
-		}
-
-		size, created, err := writeUploadedFile(storage, name, r.Body)
-		if err != nil {
-			switch {
-			case errors.Is(err, ErrWritableFS):
-				writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "file uploads are not supported"})
-			case errors.Is(err, ErrUploadTooLarge):
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"_status": 413, "message": "uploaded file is too large"})
-			case errors.Is(err, ErrNotRegularFile):
-				writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "target is not a regular file"})
-			default:
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to store file"})
-			}
-			return
-		}
-
-		status := http.StatusOK
-		if created {
-			status = http.StatusCreated
-		}
-		writeJSON(w, status, map[string]any{
-			"_status": status,
-			"path":    name,
-			"size":    size,
-			"url":     "/" + name,
-		})
-	})
-
-	mux.HandleFunc("DELETE /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
-		if !isLoggedIn(r) {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"_status": 401, "message": "authentication required"})
-			return
-		}
-
-		name, err := normalizeFSPath(r.PathValue("path"))
-		if err != nil || isBlockedPage(name) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad file path"})
-			return
-		}
-		if err := removeStoredFile(storage, name); err != nil {
-			switch {
-			case errors.Is(err, ErrWritableFS):
-				writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "file deletion is not supported"})
-			case os.IsNotExist(err):
-				writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "file not found"})
-			case errors.Is(err, ErrNotRegularFile):
-				writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "target is not a regular file"})
-			default:
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to delete file"})
-			}
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	mux.HandleFunc("GET /api/pages/{page...}", func(w http.ResponseWriter, r *http.Request) {
-		page, err := pageFile(apiPagePath(r))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
-			return
-		}
-		if sectionName, ok := r.URL.Query()["section"]; ok {
-			sectionName := firstQueryValue(sectionName)
-			section, err := readSection(storage, sectionPage(config, page, sectionName), sectionName)
-			if err != nil {
-				if errors.Is(err, ErrSectionNotFound) || os.IsNotExist(err) {
-					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
-					return
-				}
-				if strings.HasPrefix(err.Error(), "invalid section name:") {
-					writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
-					return
-				}
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to read section"})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{
-				"section":      section.Name,
-				"updateUnixMS": section.UpdateUnixMS,
-				"text":         section.Body,
-			})
-			return
-		}
-		if data, err := readStorageFile(storage, page); err == nil {
-			setLastModifiedFromStorage(w, storage, page)
-			writeText(w, http.StatusOK, data)
-		} else if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "page not found"})
-		} else {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to read page"})
-		}
-	})
-
-	mux.HandleFunc("POST /api/pages/{page...}", func(w http.ResponseWriter, r *http.Request) {
-		if !isLoggedIn(r) {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"_status": 401, "message": "authentication required"})
-			return
-		}
-		page, err := pageFile(apiPagePath(r))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
-			return
-		}
-		if isBlockedPage(page) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "bad page name"})
-			return
-		}
-
-		var parsed struct {
-			Text         *string `json:"text"`
-			UpdateUnixMS int64   `json:"updateUnixMS"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		if err := decoder.Decode(&parsed); err != nil || parsed.Text == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "request body must contain a text field"})
-			return
-		}
-		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": "request body must contain a single JSON object"})
-			return
-		}
-		if sectionValues, ok := r.URL.Query()["section"]; ok {
-			sectionName := firstQueryValue(sectionValues)
-			targetPage := sectionPage(config, page, sectionName)
-			pageConfigPath := "/" + strings.TrimPrefix(targetPage, "/")
-			insertInOrder := directoryConfig(config, pageConfigPath).Diary
-			if err := saveSection(storage, targetPage, sectionName, *parsed.Text, parsed.UpdateUnixMS, insertInOrder); err != nil {
-				switch {
-				case errors.Is(err, ErrSectionNotFound), os.IsNotExist(err):
-					writeJSON(w, http.StatusNotFound, map[string]any{"_status": 404, "message": "section not found"})
-				case errors.Is(err, ErrWritableFS):
-					writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "section updates are not supported"})
-				default:
-					if strings.HasPrefix(err.Error(), "invalid section name:") || strings.HasPrefix(err.Error(), "invalid section update timestamp:") {
-						writeJSON(w, http.StatusBadRequest, map[string]any{"_status": 400, "message": err.Error()})
-					} else {
-						writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to update section"})
-					}
-				}
-				return
-			}
-			message := "stored"
-			if *parsed.Text == "" {
-				message = "deleted"
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": message})
-			return
-		}
-		if *parsed.Text == "" {
-			err := removeStoredFile(storage, page)
-			if err != nil && !errors.Is(err, fs.ErrNotExist) {
-				if errors.Is(err, ErrWritableFS) {
-					writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "page deletion is not supported"})
-				} else {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to delete page"})
-				}
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "deleted"})
-			return
-		}
-		if err := writePage(storage, page, []byte(*parsed.Text)); err != nil {
-			if errors.Is(err, ErrWritableFS) {
-				writeJSON(w, http.StatusNotImplemented, map[string]any{"_status": 501, "message": "page updates are not supported"})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"_status": 500, "message": "failed to store page"})
-			return
-		}
-
-		writeJSON(w, http.StatusOK, map[string]any{"_status": 200, "message": "stored"})
-	})
+	registerAPIHandlers(mux, storage, config)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if file, ok := dataFileName(storage, r.URL.Path); ok {

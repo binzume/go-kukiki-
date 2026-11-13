@@ -2,17 +2,13 @@
 
 var pageApi = "/api/pages/"
 
-function requestJson(method, url, f){
+function requestApi(method, url, f){
 	var xhr = new XMLHttpRequest();
 	xhr.open(method, url, true);
 	xhr.onreadystatechange = function() {
 		if (xhr.readyState != 4) return;
-		var json = null;
-		try {
-			json = JSON.parse(xhr.responseText);
-		} catch(e) {}
 		if (f) {
-			f(json, xhr)
+			f(xhr)
 		}
 	};
 	return xhr;
@@ -150,16 +146,12 @@ window.addEventListener('DOMContentLoaded',(function(e){
 		xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
 		status.textContent = 'Uploading ' + file.name + '...';
 		xhr.onload = function() {
-			var json = null;
-			try {
-				json = JSON.parse(xhr.responseText);
-			} catch (error) {}
 			if (xhr.status >= 200 && xhr.status < 300) {
 				insertAtEditorSelection(markdownLinkForFile(file.name, relativeDirectory), selection);
 				update();
 				status.textContent = 'Uploaded ' + file.name + '. Save to apply the link.';
 			} else {
-				status.textContent = (json && json.message) || 'Failed to upload file';
+				status.textContent = xhr.responseText.trim() || 'Failed to upload file';
 			}
 			uploadSelection = null;
 		};
@@ -205,11 +197,12 @@ window.addEventListener('DOMContentLoaded',(function(e){
 
 	var loadSection = function() {
 		var name = sectionName();
-		var load = requestJson('GET', sectionApiUrl(pagePath, name), function(json, xhr) {
+		var load = requestApi('GET', sectionApiUrl(pagePath, name), function(xhr) {
 		if (xhr.status == 200) {
 			if (name != '') {
-				sectionUpdateUnixMS = (json && json.updateUnixMS) || 0;
-				editor.setValue((json && json.text) || '');
+				var updateUnixMS = xhr.getResponseHeader('X-Update-Unix-Ms');
+				sectionUpdateUnixMS = parseInt(updateUnixMS, 10) || 0;
+				editor.setValue(xhr.responseText);
 			} else {
 				sectionUpdateUnixMS = 0;
 				editor.setValue(xhr.responseText);
@@ -223,7 +216,7 @@ window.addEventListener('DOMContentLoaded',(function(e){
 			update();
 			status.textContent = name != '' ? 'New section' : 'New page';
 		} else {
-			status.textContent = (json && json.message) || 'Failed to load page';
+			status.textContent = xhr.responseText.trim() || 'Failed to load page';
 		}
 	});
 		load.send();
@@ -240,11 +233,11 @@ window.addEventListener('DOMContentLoaded',(function(e){
 
 		var pagePath = document.getElementById('pagepath').textContent.trim();
 		var name = sectionName();
-		var save = requestJson('POST', sectionApiUrl(pagePath, name), function(json, xhr) {
+		var save = requestApi('POST', sectionApiUrl(pagePath, name), function(xhr) {
 			if (xhr.status >= 200 && xhr.status < 300) {
 				status.textContent = 'Saved';
 			} else {
-				status.textContent = (json && json.message) || 'Failed to save page';
+				status.textContent = xhr.responseText.trim() || 'Failed to save page';
 			}
 		});
 		save.setRequestHeader('Content-Type', 'application/json');
